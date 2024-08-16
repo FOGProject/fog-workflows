@@ -26,9 +26,10 @@ jobs:
       - uses: actions/create-github-app-token@v1
         id: app-token
         with:
-          # required
           app-id: ${{ vars.FOG_WORKFLOWS_APPID }}
           private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
+          owner: FOGProject
+          repositories: "fogproject"
 
       - uses: actions/checkout@v4
         with:
