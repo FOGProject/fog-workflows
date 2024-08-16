@@ -1,0 +1,247 @@
+name: Stable Release
+
+on:
+  workflow_dispatch:
+  schedule:
+  - cron: "22 14 16 * *"
+
+jobs:
+
+  create-release-pull-request:
+    runs-on: ubuntu-22.04
+    
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+          private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
+          owner: FOGProject
+          repositories: "fogproject"
+
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: FOGProject/fogproject
+          ref: dev-branch
+          # Make sure the value of GITHUB_TOKEN will not be persisted in repo's config
+          persist-credentials: false
+      
+      - name: Get version to be released and create PR with that in the name
+        run: | 
+          echo 'Get version to be released and create PR with that in the name'
+          system_file="$(git rev-parse --show-toplevel)/packages/web/lib/fog/system.class.php"
+          tag=$(grep "define('FOG_VERSION'" $system_file | sed "s/.*FOG_VERSION', '\([^']*\)');/\1/")
+          echo "Tag: $tag"
+          gh pr create -R FOGProject/fogproject -B stable -H dev-branch --title "Stable Release PR For ${tag} - $(date '+%Y-%m-%d')" --body "Pull Request for creating the latest stable release from staged security fixes, bug fixes, and minor enhancements in dev-branch. Created as needed or monthly on 15th of every month, released once tests are passing"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  run-install-tests:
+    needs: create-release-pull-request
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+          private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
+          owner: FOGProject
+          repositories: "fogproject-install-validation"
+
+      - name: Call main workflow that calls all the distros
+        run: gh workflow run --repo FOGProject/fogproject-install-validation run_all_distros.yml
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  check-all-tests-completed-successfully:
+    needs: run-install-tests
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+          app-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+          private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
+          owner: FOGProject
+          repositories: "fogproject-install-validation"
+
+      - name: Wait a minute for the runs to start
+        run: sleep 60
+
+      - name: Get run IDs
+        run: |
+          run_id=$(gh run list --repo FOGProject/fogproject-install-validation --workflow run_all_distros.yml --json databaseId --limit 1 | jq -r '.[0].databaseId')
+          echo "RUN_ID=$run_id" >> $GITHUB_ENV
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        
+      - name: Check if distro workflow passed or failed
+        run: |
+          run_status=""
+          while [[ $run_status != "success" && $run_status != "failure" ]]; do
+            sleep 15
+            run_status=$(gh run view --repo FOGProject/fogproject-install-validation ${{ env.RUN_ID }} --exit-status --json conclusion | jq -r '.conclusion')
+          done
+          
+          if [[ $run_status == "failure" ]]; then
+            exit 1
+          fi
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  merge-after-all-tests-passed:
+    needs: check-all-tests-completed-successfully
+    runs-on: ubuntu-22.04
+
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+            app-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+            private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
+            owner: FOGProject
+            repositories: "fogproject"
+      
+      - name: Checkout Dev-branch
+        uses: actions/checkout@v4
+        with: 
+            token: ${{ steps.app-token.outputs.token }}
+            repository: FOGProject/fogproject
+            ref: dev-branch
+            # Make sure the value of GITHUB_TOKEN will not be persisted in repo's config
+            persist-credentials: false
+            
+      - name: Get The Version
+        run: |
+          echo 'Get the tag'
+          system_file="$(git rev-parse --show-toplevel)/packages/web/lib/fog/system.class.php"
+          tag=$(grep "define('FOG_VERSION'" $system_file | sed "s/.*FOG_VERSION', '\([^']*\)');/\1/")
+          echo "TAG=$tag" >> $GITHUB_ENV
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        
+      - name: Checkout Stable
+        uses: actions/checkout@v4
+        with: 
+            token: ${{ steps.app-token.outputs.token }}
+            repository: FOGProject/fogproject
+            ref: stable
+            # Make sure the value of GITHUB_TOKEN will not be persisted in repo's config
+            persist-credentials: false
+
+      - name: Merge the PR
+        run: |
+            echo "merge the pull request bringing dev-branch into stable";
+            tag=${{ env.TAG }}
+            gh pr merge dev-branch --squash --subject "Stable Release - ${tag}";
+        env:
+            GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+
+
+  close-pr-if-tests-fail:
+    needs: check-all-tests-completed-successfully
+    runs-on: ubuntu-22.04
+    if: failure()
+  
+    steps:
+      - uses: actions/create-github-app-token@v1
+        id: app-token
+        with:
+            app-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+            private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
+            owner: FOGProject
+            repositories: "fogproject"
+
+      - name: Checkout Stable
+        uses: actions/checkout@v4
+        with: 
+            token: ${{ steps.app-token.outputs.token }}
+            repository: FOGProject/fogproject
+            ref: stable
+            # Make sure the value of GITHUB_TOKEN will not be persisted in repo's config
+            persist-credentials: false
+
+      - name: Get PR number
+        run: |
+          pr_number=$(gh pr list --repo ${{ github.repository }} --json title,number | jq -r '.[] | select(.title | test("Stable Release PR for*"; "i")) | .number')
+          echo "PR_NUMBER=$pr_number" >> $GITHUB_ENV
+        env:
+            GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+      - name: Close PR
+        run: |
+          closure_message="Closing PR due to failure in tests"
+          gh pr close --comment "$closure_message" ${{ env.PR_NUMBER }}
+        env:
+            GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      
+      - name: Announce error on Discord
+        uses: sarisia/actions-status-discord@v1
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          content: "Hey @everyone, validation tests failed. PR closed"
+          title: Validation tests
+          status: ${{ needs.check-all-tests-completed-successfully.result }}
+          color: 0xff0000
+
+  tag-and-release:
+    needs: merge-after-all-tests-passed
+    runs-on: ubuntu-22.04
+
+    steps:
+    - uses: actions/create-github-app-token@v1
+      id: app-token
+      with:
+          app-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+          private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
+          owner: FOGProject
+          repositories: "fogproject"
+
+    - name: Checkout Stable
+      uses: actions/checkout@v4
+      with: 
+          token: ${{ steps.app-token.outputs.token }}
+          repository: FOGProject/fogproject
+          ref: stable
+          # Make sure the value of GITHUB_TOKEN will not be persisted in repo's config
+          persist-credentials: false
+    
+    - name: Tag and release
+      run: |
+        echo 'Find the version to use for the tag, create the release, and sync the dev and stable branches'
+        echo 'find the version to create as a tag'
+        system_file="$(git rev-parse --show-toplevel)/packages/web/lib/fog/system.class.php"
+        tag=$(grep "define('FOG_VERSION'" $system_file | sed "s/.*FOG_VERSION', '\([^']*\)');/\1/")
+        echo 'create the tag and release...'
+        gh release create $tag --latest --generate-notes --target stable
+        echo 'sync dev-branch with stable branch (merge stable into dev-branch)...'
+        # git config core.hooksPath .githooks #custom githooks not working in github runner
+        gh pr create -B dev-branch -H stable --title "merge stable - ${tag} into dev" --body "Pull Request for syncing stable release commit back to dev after a release"
+        gh pr merge stable --merge --subject "merge stable - ${tag} into dev";
+      env:
+        GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      
+  discord-success:
+    needs: tag-and-release
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Get tag as env
+        run: |
+          tag=$(grep "define('FOG_VERSION'" $system_file | sed "s/.*FOG_VERSION', '\([^']*\)');/\1/")
+          echo "TAG=$tag" >> $GITHUB_ENV
+
+      - name: Announce success on Discord
+        uses: sarisia/actions-status-discord@v1
+        with:
+          webhook: ${{ secrets.DISCORD_WEBHOOK }}
+          title: "New release"
+          description: Click [here](https://github.com/fogproject/fogproject/releases/latest) to check the newest release.
+          color: 0x00ff00
