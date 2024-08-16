@@ -3,7 +3,7 @@ name: Stable Release
 on:
   workflow_dispatch:
   schedule:
-  - cron: "22 14 16 * *"
+  - cron: "22 14 15 * *"
 
 jobs:
 
@@ -136,7 +136,7 @@ jobs:
         run: |
             echo "merge the pull request bringing dev-branch into stable";
             tag=${{ env.TAG }}
-            gh pr merge dev-branch --squash --subject "Stable Release - ${tag}";
+            gh pr merge dev-branch --merge --subject "Stable Release - ${tag}";
         env:
             GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
