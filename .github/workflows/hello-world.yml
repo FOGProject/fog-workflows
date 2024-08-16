@@ -44,6 +44,6 @@ jobs:
           system_file="$(git rev-parse --show-toplevel)/packages/web/lib/fog/system.class.php"
           tag=$(grep "define('FOG_VERSION'" $system_file | sed "s/.*FOG_VERSION', '\([^']*\)');/\1/")
           echo "Tag: $tag"
-          # gh pr create -B stable -H dev-branch --title "Stable Release PR For ${tag} - $(date '+%Y-%m-%d')" --body "Pull Request for creating the latest stable release from staged security fixes, bug fixes, and minor enhancements in dev-branch. Created as needed or monthly on 15th of every month, released once tests are passing"
+          gh pr create -R FOGProject/fogproject -B stable -H dev-branch --title "Stable Release PR For ${tag} - $(date '+%Y-%m-%d')" --body "Pull Request for creating the latest stable release from staged security fixes, bug fixes, and minor enhancements in dev-branch. Created as needed or monthly on 15th of every month, released once tests are passing"
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
