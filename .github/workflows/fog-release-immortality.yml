@@ -25,4 +25,4 @@ jobs:
         uses: PhrozenByte/gh-workflow-immortality@v1
         with:
           secret: ${{ steps.app-token.outputs.token }}
-          repos: FOGProject\fog-workflows
+          repos: FOGProject/fog-workflows
