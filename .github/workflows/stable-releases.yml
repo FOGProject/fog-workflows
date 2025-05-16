@@ -165,17 +165,19 @@ jobs:
             # Make sure the value of GITHUB_TOKEN will not be persisted in repo's config
             persist-credentials: false
 
-      - name: Get PR number
-        run: |
-          pr_number=$(gh pr list --repo ${{ github.repository }} --json title,number | jq -r '.[] | select(.title | test("Stable Release PR for*"; "i")) | .number')
-          echo "PR_NUMBER=$pr_number" >> $GITHUB_ENV
-        env:
-            GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      # - name: Get PR number
+      #   run: |
+      #     pr_number=$(gh pr list --repo ${{ github.repository }} --json title,number | jq -r '.[] | select(.title | test("Stable Release PR for*"; "i")) | .number')
+      #     echo "PR_NUMBER=$pr_number" >> $GITHUB_ENV
+      #   env:
+      #       GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Close PR
         run: |
+          pr_number=$(gh pr list --search "is:open Stable Release PR For* in:title" --repo FOGProject/fogproject --json title,number --jq '.[] | select(.title | test("Stable Release PR For*"; "i")) | .number')
+          echo "PR_NUMBER=$pr_number" >> $GITHUB_ENV
           closure_message="Closing PR due to failure in tests"
-          gh pr close --comment "$closure_message" ${{ env.PR_NUMBER }}
+          gh pr close ${{ env.PR_NUMBER }} --comment "$closure_message" --repo FOGProject/fogproject
         env:
             GH_TOKEN: ${{ steps.app-token.outputs.token }}
       
