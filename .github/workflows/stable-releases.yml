@@ -9,12 +9,12 @@ jobs:
 
   create-release-pull-request:
     runs-on: ubuntu-24.04
-    
+
     steps:
       - uses: actions/create-github-app-token@v3
         id: app-token
         with:
-          app-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+          client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
           private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
           owner: FOGProject
           repositories: "fogproject"
@@ -26,7 +26,7 @@ jobs:
           ref: dev-branch
           # Make sure the value of GITHUB_TOKEN will not be persisted in repo's config
           persist-credentials: false
-      
+
       - name: Get version to be released and create PR with that in the name
         run: | 
           echo 'Get version to be released and create PR with that in the name'
@@ -45,7 +45,7 @@ jobs:
       - uses: actions/create-github-app-token@v3
         id: app-token
         with:
-          app-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+          client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
           private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
           owner: FOGProject
           repositories: "fogproject-install-validation"
@@ -63,7 +63,7 @@ jobs:
       - uses: actions/create-github-app-token@v3
         id: app-token
         with:
-          app-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+          client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
           private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
           owner: FOGProject
           repositories: "fogproject-install-validation"
@@ -77,7 +77,7 @@ jobs:
           echo "RUN_ID=$run_id" >> $GITHUB_ENV
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        
+
       - name: Check if distro workflow passed or failed
         run: |
           run_status=""
@@ -85,7 +85,7 @@ jobs:
             sleep 15
             run_status=$(gh run view --repo FOGProject/fogproject-install-validation ${{ env.RUN_ID }} --exit-status --json conclusion | jq -r '.conclusion')
           done
-          
+
           if [[ $run_status == "failure" ]]; then
             exit 1
           fi
@@ -100,11 +100,11 @@ jobs:
       - uses: actions/create-github-app-token@v3
         id: app-token
         with:
-            app-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+            client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
             private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
             owner: FOGProject
             repositories: "fogproject"
-      
+
       - name: Checkout Dev-branch
         uses: actions/checkout@v6
         with: 
@@ -113,7 +113,7 @@ jobs:
             ref: dev-branch
             # Make sure the value of GITHUB_TOKEN will not be persisted in repo's config
             persist-credentials: false
-            
+
       - name: Get The Version
         run: |
           echo 'Get the tag'
@@ -122,7 +122,7 @@ jobs:
           echo "TAG=$tag" >> $GITHUB_ENV
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-        
+
       - name: Checkout Stable
         uses: actions/checkout@v6
         with: 
@@ -146,12 +146,12 @@ jobs:
     needs: check-all-tests-completed-successfully
     runs-on: ubuntu-24.04
     if: failure()
-  
+
     steps:
       - uses: actions/create-github-app-token@v3
         id: app-token
         with:
-            app-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+            client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
             private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
             owner: FOGProject
             repositories: "fogproject"
@@ -179,7 +179,7 @@ jobs:
           gh pr close $PrNum --comment "$closure_message" --repo FOGProject/fogproject
         env:
             GH_TOKEN: ${{ steps.app-token.outputs.token }}
-      
+
       - name: Announce error on Discord
         uses: sarisia/actions-status-discord@v1
         with:
@@ -197,7 +197,7 @@ jobs:
     - uses: actions/create-github-app-token@v3
       id: app-token
       with:
-          app-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+          client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
           private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
           owner: FOGProject
           repositories: "fogproject"
@@ -210,7 +210,7 @@ jobs:
           ref: stable
           # Make sure the value of GITHUB_TOKEN will not be persisted in repo's config
           persist-credentials: false
-    
+
     - name: Tag and release
       run: |
         echo 'Find the version to use for the tag, create the release, and sync the dev and stable branches'
@@ -225,7 +225,7 @@ jobs:
         gh pr merge stable --merge --subject "merge stable - ${tag} into dev";
       env:
         GH_TOKEN: ${{ steps.app-token.outputs.token }}
-      
+
   discord-success:
     needs: tag-and-release
     runs-on: ubuntu-24.04
