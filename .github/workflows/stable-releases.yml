@@ -54,7 +54,7 @@ jobs:
           webhook: ${{ secrets.DISCORD_WEBHOOK }}
           content: "Hey @everyone, Nothing to release. PR not created"
           title: Validation tests
-          status: ${{ needs.check-all-tests-completed-successfully.result }}
+          status: ${{ steps.create_pr.outputs.skip_release }}
           color: 0xff0000
 
   run-install-tests:
