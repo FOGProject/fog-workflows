@@ -10,14 +10,14 @@ jobs:
   keepalive:
     name: Fog Release Workflow Immortality
 
-    runs-on: ubuntu-22.04
+    runs-on: ubuntu-latest
     permissions: {}
 
     steps:
       - uses: actions/create-github-app-token@v3
         id: app-token
         with:
-          app-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+          client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
           private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
           owner: FOGProject
           
