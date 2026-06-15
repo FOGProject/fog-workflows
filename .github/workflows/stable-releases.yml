@@ -55,7 +55,6 @@ jobs:
 
     steps:
       - name: Announce no release on Discord
-        if: steps.create_pr.outputs.skip_release == 'true'
         uses: sarisia/actions-status-discord@v1
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK }}
