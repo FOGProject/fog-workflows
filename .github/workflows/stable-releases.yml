@@ -47,6 +47,13 @@ jobs:
           fi
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
+
+  no-release-needed:
+    needs: create-release-pull-request
+    if: needs.create-release-pull-request.outputs.skip_release == 'true'
+    runs-on: ubuntu-24.04
+
+    steps:
       - name: Announce no release on Discord
         if: steps.create_pr.outputs.skip_release == 'true'
         uses: sarisia/actions-status-discord@v1
@@ -54,7 +61,6 @@ jobs:
           webhook: ${{ secrets.DISCORD_WEBHOOK }}
           content: "Hey @everyone, Nothing to release. PR not created"
           title: "No changes - no release"
-          status: "nothing to release"
           color: 0xff0000
 
   run-install-tests:
@@ -281,5 +287,5 @@ jobs:
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK }}
           title: "New release"
-          description: Click [here](https://github.com/fogproject/fogproject/releases/latest) to check the newest release.
+          description: Click [here](https://github.com/fogproject/fogproject/releases/tag/$tag) to check the $tag release notes.
           color: 0x00ff00
