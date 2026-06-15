@@ -44,7 +44,7 @@ jobs:
             exit 0
           else
             echo "skip_release=false" >> "$GITHUB_OUTPUT"
-            gh pr create -R FOGProject/fogproject -B stable -H dev-branch --title "Stable Release PR For ${tag} - $(date '+%Y-%m-%d')" --body "Pull Request for creating the latest stable release from staged security fixes, bug fixes, and minor enhancements in dev-branch. Created as needed or monthly on 15th of every month, released once tests are passing"
+            gh pr create -R FOGProject/fogproject -B stable -H dev-branch --title "Stable Release PR For ${tag} - $(date '+%Y-%m-%d')" --body "Pull Request for creating the latest stable release from staged security fixes, bug fixes, and minor enhancements in dev-branch. Created as needed or monthly on 11th of every month (queued in gh actions at 11:11 UTC), released once tests are passing"
           fi
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
