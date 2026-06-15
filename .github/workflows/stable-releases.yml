@@ -3,7 +3,7 @@ name: Stable Release
 on:
   workflow_dispatch:
   schedule:
-  - cron: "22 14 15 * *"
+  - cron: "11 11 11 * *"
 
 jobs:
 
@@ -60,7 +60,7 @@ jobs:
           webhook: ${{ secrets.DISCORD_WEBHOOK }}
           content: "Hey @everyone, Nothing to release. PR not created"
           title: "No changes - no release"
-          color: 0xff0000
+          color: 0xffe135
 
   run-install-tests:
     needs: create-release-pull-request
