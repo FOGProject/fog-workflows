@@ -286,18 +286,45 @@ jobs:
             echo "$closedIssues" >> "$releaseBody"
         fi
         #list any published security advisories since the previous release
-        secAdvisories=$(gh api /repos/FOGProject/fogproject/security-advisories \
-            | jq -r --arg date "$prevDate" '.[] | select(.published_at >= $date) | "* \(.summary) ([\(.ghsa_id)](\(.html_url)))"')
-        # 2. Inject the Security block
+        gh api /repos/FOGProject/fogproject/security-advisories \
+            | jq --arg date "$prevDate" '[.[] | select(.published_at >= $date)]' > "$RUNNER_TEMP/new_advisories.json"
+        secAdvisories=$(jq -r '.[] | "* \(.summary) ([\(.ghsa_id)](\(.html_url)))"' "$RUNNER_TEMP/new_advisories.json")
         if [ -n "$secAdvisories" ]; then
             echo "" >> $releaseBody
             echo "---" >> $releaseBody
             echo "" >> $releaseBody    
             echo "## Security Advisories" >> "$releaseBody"
             echo "$secAdvisories" >> "$releaseBody"
+            # --- Update the Advisories ---
+            # Extract just the IDs from our cached JSON
+            ghsa_ids=$(jq -r '.[] | .ghsa_id' "$RUNNER_TEMP/new_advisories.json")
+            #add >=$tag to the patched_versions of each advisory published since the previous release. 
+            for ghsa_id in $ghsa_ids; do
+                echo "Updating Security Advisory $ghsa_id with patched version >=$tag..."
+                
+                # Pull the current vulnerabilities mapping
+                current_vulns=$(gh api /repos/FOGProject/fogproject/security-advisories/"$ghsa_id" --jq '.vulnerabilities')
+                
+                # Update patched_versions. Notice the arg is now ">=$tag"
+                updated_vulns=$(echo "$current_vulns" | jq --arg new_tag ">=$tag" 'map(
+                    if .patched_versions == "" or .patched_versions == null then
+                        .patched_versions = $new_tag
+                    else
+                        .patched_versions += ", \($new_tag)"
+                    end
+                )')
+                echo "{\"vulnerabilities\": $updated_vulns}" > "$RUNNER_TEMP/patch_payload.json"
+                # Send the PATCH request
+                gh api \
+                    --method PATCH \
+                    -H "Accept: application/vnd.github+json" \
+                    /repos/FOGProject/fogproject/security-advisories/"$ghsa_id" \
+                    --input "$RUNNER_TEMP/patch_payload.json"
+            done
         fi
         gh release create "$tag" --latest -F "$releaseBody" --target stable --title "$tag"
         rm -f $releaseBody
+        rm -f "$RUNNER_TEMP/new_advisories.json"
         echo 'sync dev-branch with stable branch (merge stable into dev-branch)...'
         # git config core.hooksPath .githooks #custom githooks not working in github runner
         gh pr create -B dev-branch -H stable --title "merge stable - ${tag} into dev" --body "Pull Request for syncing stable release commit back to dev after a release"
