@@ -11,6 +11,8 @@ jobs:
     runs-on: ubuntu-24.04
     outputs:
       skip_release: ${{ steps.create_pr.outputs.skip_release }}
+      release_tag: ${{ steps.create_pr.outputs.tag }}
+      previous_tag: ${{ steps.create_pr.outputs.prevTag }}
     steps:
       - uses: actions/create-github-app-token@v3
         id: app-token
@@ -20,12 +22,11 @@ jobs:
           owner: FOGProject
           repositories: "fogproject"
 
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           token: ${{ steps.app-token.outputs.token }}
           repository: FOGProject/fogproject
           ref: dev-branch
-          # Make sure the value of GITHUB_TOKEN will not be persisted in repo's config
           persist-credentials: false
 
       - name: Get version to be released and create PR with that in the name
@@ -34,7 +35,9 @@ jobs:
           echo 'Get version to be released and create PR with that in the name'
           system_file="$(git rev-parse --show-toplevel)/packages/web/lib/fog/system.class.php"
           tag=$(grep "define('FOG_VERSION'" $system_file | sed "s/.*FOG_VERSION', '\([^']*\)');/\1/")
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
           prevTag=$(gh release view --json tagName --jq '.tagName')
+          echo "prevTag=$prevTag" >> "$GITHUB_OUTPUT"
           # prevTag=$(gh release view --repo FOGProject/fogproject stable --json tagName --jq '.tagName')
           echo "Tag: $tag"
           echo "Previous Tag: $prevTag"
@@ -59,7 +62,7 @@ jobs:
         uses: sarisia/actions-status-discord@v1
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK }}
-          content: "Hey @everyone, Nothing to release. PR not created"
+          content: "Hey @everyone, Nothing to release. PR not created, latest remains ${{ needs.create-release-pull-request.outputs.previous_tag }}."
           title: "No changes - no release"
           color: 0xffe135
 
@@ -67,6 +70,9 @@ jobs:
     needs: create-release-pull-request
     if: needs.create-release-pull-request.outputs.skip_release != 'true'
     runs-on: ubuntu-24.04
+    outputs:
+      release_tag: ${{ needs.create-release-pull-request.outputs.release_tag }}
+      previous_tag: ${{ needs.create-release-pull-request.outputs.previous_tag }}
 
     steps:
       - uses: actions/create-github-app-token@v3
@@ -85,6 +91,9 @@ jobs:
   check-all-tests-completed-successfully:
     needs: run-install-tests
     runs-on: ubuntu-24.04
+    outputs:
+      release_tag: ${{ needs.run-install-tests.outputs.release_tag }}
+      previous_tag: ${{ needs.run-install-tests.outputs.previous_tag }}
 
     steps:
       - uses: actions/create-github-app-token@v3
@@ -122,6 +131,9 @@ jobs:
   merge-after-all-tests-passed:
     needs: check-all-tests-completed-successfully
     runs-on: ubuntu-24.04
+    outputs:
+      release_tag: ${{ needs.check-all-tests-completed-successfully.outputs.release_tag }}
+      previous_tag: ${{ needs.check-all-tests-completed-successfully.outputs.previous_tag }}
 
     steps:
       - uses: actions/create-github-app-token@v3
@@ -132,42 +144,21 @@ jobs:
             owner: FOGProject
             repositories: "fogproject"
 
-      - name: Checkout Dev-branch
-        uses: actions/checkout@v6
-        with: 
-            token: ${{ steps.app-token.outputs.token }}
-            repository: FOGProject/fogproject
-            ref: dev-branch
-            # Make sure the value of GITHUB_TOKEN will not be persisted in repo's config
-            persist-credentials: false
-
-      - name: Get The Version
-        run: |
-          echo 'Get the tag'
-          system_file="$(git rev-parse --show-toplevel)/packages/web/lib/fog/system.class.php"
-          tag=$(grep "define('FOG_VERSION'" $system_file | sed "s/.*FOG_VERSION', '\([^']*\)');/\1/")
-          echo "TAG=$tag" >> $GITHUB_ENV
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-
       - name: Checkout Stable
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with: 
             token: ${{ steps.app-token.outputs.token }}
             repository: FOGProject/fogproject
             ref: stable
-            # Make sure the value of GITHUB_TOKEN will not be persisted in repo's config
             persist-credentials: false
 
       - name: Merge the PR
         run: |
             echo "merge the pull request bringing dev-branch into stable";
-            tag=${{ env.TAG }}
+            tag=${{ needs.check-all-tests-completed-successfully.outputs.release_tag }}
             gh pr merge dev-branch --merge --subject "Stable Release - ${tag}";
         env:
             GH_TOKEN: ${{ steps.app-token.outputs.token }}
-
-
 
   close-pr-if-tests-fail:
     needs: check-all-tests-completed-successfully
@@ -184,12 +175,11 @@ jobs:
             repositories: "fogproject"
 
       - name: Checkout Stable
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with: 
             token: ${{ steps.app-token.outputs.token }}
             repository: FOGProject/fogproject
             ref: stable
-            # Make sure the value of GITHUB_TOKEN will not be persisted in repo's config
             persist-credentials: false
 
       - name: Get PR number
@@ -211,7 +201,7 @@ jobs:
         uses: sarisia/actions-status-discord@v1
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK }}
-          content: "Hey @everyone, validation tests failed. PR closed"
+          content: "Hey @everyone, validation tests failed. PR ${{ env.PR_NUMBER }} closed. Release ${{ needs.check-all-tests-completed-successfully.outputs.release_tag }} NOT CREATED, latest remains ${{ needs.check-all-tests-completed-successfully.outputs.previous_tag }}. Please check the logs for details."
           title: Validation tests
           status: ${{ needs.check-all-tests-completed-successfully.result }}
           color: 0xff0000
@@ -219,6 +209,9 @@ jobs:
   tag-and-release:
     needs: merge-after-all-tests-passed
     runs-on: ubuntu-24.04
+    outputs:
+      release_tag: ${{ needs.merge-after-all-tests-passed.outputs.release_tag }}
+      previous_tag: ${{ needs.merge-after-all-tests-passed.outputs.previous_tag }}
 
     steps:
     - uses: actions/create-github-app-token@v3
@@ -230,14 +223,13 @@ jobs:
           repositories: "fogproject"
 
     - name: Checkout Stable
-      uses: actions/checkout@v6
+      uses: actions/checkout@v7
       with:
           token: ${{ steps.app-token.outputs.token }}
           repository: FOGProject/fogproject
           ref: stable
           # Fetch full history and tags so the previous release tag resolves for git log
           fetch-depth: 0
-          # Make sure the value of GITHUB_TOKEN will not be persisted in repo's config
           persist-credentials: false
 
     - name: Tag and release
@@ -245,24 +237,35 @@ jobs:
         releaseBody="$RUNNER_TEMP/release_body.md"
         echo 'Find the version to use for the tag, create the release, and sync the dev and stable branches'
         echo 'find the version to create as a tag'
-        system_file="$(git rev-parse --show-toplevel)/packages/web/lib/fog/system.class.php"
-        tag=$(grep "define('FOG_VERSION'" $system_file | sed "s/.*FOG_VERSION', '\([^']*\)');/\1/")
-        prevTag=$(gh release view --json tagName --jq '.tagName')
+        #system_file="$(git rev-parse --show-toplevel)/packages/web/lib/fog/system.class.php"
+        #tag=$(grep "define('FOG_VERSION'" $system_file | sed "s/.*FOG_VERSION', '\([^']*\)');/\1/")
+        tag="${{ needs.merge-after-all-tests-passed.outputs.release_tag }}"
+        prevTag="${{ needs.merge-after-all-tests-passed.outputs.previous_tag }}"
+        #prevTag=$(gh release view --json tagName --jq '.tagName')
         echo 'create the tag and release...'
-        # gh release create $tag --latest --generate-notes --target stable
+        #generate the default release notes
         gh api \
             --method POST \
             -H "Accept: application/vnd.github+json" \
             /repos/FOGProject/fogproject/releases/generate-notes \
             -f tag_name="$tag" \
             -f previous_tag_name="$prevTag" \
+            -f target_commitish="stable" \
             -q .body > $releaseBody
+        #make adjustments to the release notes generated by gh api
+        #change "What's Changed" to "Pull Requests" in the release notes generated by gh api
+        sed -i "s/## What's Changed/## Pull Requests/" "$releaseBody"
+        #remove previous release lines
+        sed -i "/^\* .*${prevTag}/Id" "$releaseBody"
+        #add commits list minus pull requests commits already listed
         echo "" >> $releaseBody
-        echo "### Commits" >> $releaseBody
+        echo "---" >> $releaseBody
+        echo "" >> $releaseBody
+        echo "## Commits" >> $releaseBody
         echo "" >> $releaseBody
         #create bulleted commit list excluding commits generated by the release process.
-        # Use HEAD (the stable tip being released) since the new tag does not exist as a ref yet
-        git log ${prevTag}..HEAD --invert-grep -i --grep="^Stable Release" --grep="^merge stable" --pretty=format:"* %s ([%h](https://github.com/FOGProject/fogproject/commit/%H))" >> $releaseBody
+        # Use HEAD (the stable tip being released) since the new tag does not exist as a ref yet, also use --reverse to list commits in chronological order, and --invert-grep to exclude commits matching the grep patterns.
+        git log ${prevTag}..HEAD --reverse --invert-grep -i --grep="^Stable Release" --grep="^merge stable" --grep="^Merge pull request #" --pretty=format:"* %s ([%h](https://github.com/FOGProject/fogproject/commit/%H))" >> $releaseBody
         gh release create "$tag" --latest -F "$releaseBody" --target stable --title "$tag"
         rm -f $releaseBody
         echo 'sync dev-branch with stable branch (merge stable into dev-branch)...'
@@ -277,25 +280,10 @@ jobs:
     runs-on: ubuntu-24.04
 
     steps:
-      - uses: actions/create-github-app-token@v3
-        id: app-token
-        with:
-          client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
-          private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
-          owner: FOGProject
-          repositories: "fogproject"
-
-      - name: Get released tag as env
-        run: |
-          tag=$(gh release view --repo FOGProject/fogproject --json tagName --jq '.tagName')
-          echo "TAG=$tag" >> $GITHUB_ENV
-        env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
-
       - name: Announce success on Discord
         uses: sarisia/actions-status-discord@v1
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK }}
           title: "New release"
-          description: Click [here](https://github.com/fogproject/fogproject/releases/tag/${{ env.TAG }}) to check the ${{ env.TAG }} release notes.
+          description: Click [here](https://github.com/fogproject/fogproject/releases/tag/${{ needs.tag-and-release.outputs.release_tag }}) to check the ${{ needs.tag-and-release.outputs.release_tag }} release notes.
           color: 0x00ff00
