@@ -264,7 +264,7 @@ jobs:
         echo "## Commits" >> "$NOTES_FILE"
         echo "" >> "$NOTES_FILE"
         
-        git log ${PREV_TAG}..HEAD --reverse --invert-grep -i --grep="^Stable Release" --grep="^merge stable" --grep="^Merge pull request #" --pretty=format:"* %s ([%h](https://github.com/FOGProject/fogproject/commit/%H))" >> "$NOTES_FILE"
+        git log ${PREV_TAG}..HEAD --reverse --invert-grep -i --grep="^Stable Release" --grep="^merge stable" --grep="^Merge pull request #" --grep="^chore: fix stale FOG_VERSION/FOG_CHANNEL" --pretty=format:"* %s ([%h](https://github.com/FOGProject/fogproject/commit/%H))" >> "$NOTES_FILE"
 
     - name: Append Closed Issues
       continue-on-error: true
