@@ -209,6 +209,8 @@ jobs:
   tag-and-release:
     needs: merge-after-all-tests-passed
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     outputs:
       release_tag: ${{ needs.merge-after-all-tests-passed.outputs.release_tag }}
       previous_tag: ${{ needs.merge-after-all-tests-passed.outputs.previous_tag }}
@@ -334,6 +336,27 @@ jobs:
         GH_TOKEN: ${{ steps.app-token.outputs.token }}
       run: |
         gh release create "$TAG" --latest -F "$NOTES_FILE" --target stable --title "$TAG"
+
+    - name: Update stable version badge
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        set -e
+        path="badges/stable.json"
+        body=$(jq -n --arg message "$TAG" \
+          '{schemaVersion: 1, label: "stable", message: $message, color: "blue", cacheSeconds: 3600}')
+        content=$(printf '%s' "$body" | base64 -w0)
+
+        sha=$(gh api "repos/FOGProject/fog-workflows/contents/$path" --jq .sha 2>/dev/null || true)
+        if [ -n "$sha" ]; then
+          gh api "repos/FOGProject/fog-workflows/contents/$path" -X PUT \
+            -f message="chore: update stable version badge" \
+            -f content="$content" -f sha="$sha" >/dev/null
+        else
+          gh api "repos/FOGProject/fog-workflows/contents/$path" -X PUT \
+            -f message="chore: add stable version badge" \
+            -f content="$content" >/dev/null
+        fi
 
   sync-branches:
     needs: tag-and-release
