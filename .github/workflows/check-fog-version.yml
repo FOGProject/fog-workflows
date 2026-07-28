@@ -14,13 +14,15 @@ name: Check FOG version
 # either - stable-releases.yml only runs monthly/on demand and just reads
 # whatever's currently committed on dev-branch at that time.
 #
-# Recomputes FOG_VERSION/FOG_CHANNEL by running fogproject's own
+# Computes FOG_VERSION/FOG_CHANNEL by running fogproject's own
 # .githooks/lib/fog-version.sh against each watched branch - the same script
 # .githooks/pre-commit calls locally - rather than keeping a second,
-# separately-maintained copy of the math here. If the recomputed file
-# disagrees with what's committed, pushes a fixup commit directly to that
-# branch - no PR, since this mirrors the same kind of mechanical correction
-# the local hook already makes.
+# separately-maintained copy of the math here. That script only computes
+# and prints the values (no file writes, so it's safe to run without side
+# effects); .githooks/lib/apply-fog-version.sh does the actual write. If
+# the result disagrees with what's committed, pushes a fixup commit
+# directly to that branch - no PR, since this mirrors the same kind of
+# mechanical correction the local hook already makes.
 #
 # Never invoked for `stable` - that branch's version is owned entirely by
 # stable-releases.yml's release flow.
@@ -94,8 +96,19 @@ jobs:
           fetch-depth: 0
           fetch-tags: true
 
-      - name: Recompute FOG_VERSION / FOG_CHANNEL
-        run: sh .githooks/lib/fog-version.sh "${{ matrix.branch }}"
+      - name: Compute FOG_VERSION / FOG_CHANNEL
+        id: compute
+        run: |
+          set -e
+          computed=$(sh .githooks/lib/fog-version.sh "${{ matrix.branch }}")
+          echo "version=$(printf '%s\n' "$computed" | sed -n '1p')" >> "$GITHUB_OUTPUT"
+          echo "channel=$(printf '%s\n' "$computed" | sed -n '2p')" >> "$GITHUB_OUTPUT"
+
+      - name: Apply computed FOG_VERSION / FOG_CHANNEL
+        run: |
+          sh .githooks/lib/apply-fog-version.sh \
+            "${{ steps.compute.outputs.version }}" \
+            "${{ steps.compute.outputs.channel }}"
 
       - name: Commit and push if the committed version is stale
         env:
