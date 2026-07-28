@@ -1,18 +1,21 @@
 name: Check FOG version
 
-# Hourly sweep across all watched fogproject branches. Runs entirely out of
-# this repo - GitHub Actions has no native cross-repo push trigger, and
-# yesterday's push-triggered design (a stub living in fogproject, calling a
-# reusable workflow here) had real maintenance cost: the stub had to be
-# propagated onto every watched branch by hand, and worse, a bot-authored
-# fixup push back into fogproject re-triggered the stub, which re-triggered
-# this workflow, which pushed another fixup - an infinite self-correcting
-# commit loop that put 30 commits on dev-branch in ~20 minutes before it was
-# caught. A schedule trigger sidesteps both problems: nothing about this
-# workflow's own commits can cause another run, since a cron tick doesn't
-# look at what was last pushed. Nothing downstream needs sub-hour freshness
-# either - stable-releases.yml only runs monthly/on demand and just reads
-# whatever's currently committed on dev-branch at that time.
+# Daily sweep across all watched fogproject branches, at 10:10 UTC - just
+# over an hour before stable-releases.yml's monthly run (11:11 UTC on the
+# 11th), so a release never reads a stale version on the day it's cut.
+# Runs entirely out of this repo - GitHub Actions has no native cross-repo
+# push trigger, and yesterday's push-triggered design (a stub living in
+# fogproject, calling a reusable workflow here) had real maintenance cost:
+# the stub had to be propagated onto every watched branch by hand, and
+# worse, a bot-authored fixup push back into fogproject re-triggered the
+# stub, which re-triggered this workflow, which pushed another fixup - an
+# infinite self-correcting commit loop that put 30 commits on dev-branch in
+# ~20 minutes before it was caught. A schedule trigger sidesteps both
+# problems: nothing about this workflow's own commits can cause another
+# run, since a cron tick doesn't look at what was last pushed. Daily rather
+# than hourly caps any real drift-fixing to at most one commit per branch
+# per day, instead of the same fix (however rarely actually needed) running
+# up to 24 times over the same 24 hours.
 #
 # Computes FOG_VERSION/FOG_CHANNEL by running fogproject's own
 # .githooks/lib/fog-version.sh against each watched branch - the same script
@@ -34,7 +37,7 @@ name: Check FOG version
 
 on:
   schedule:
-    - cron: "0 * * * *"
+    - cron: "10 10 * * *"
   workflow_dispatch:
     inputs:
       branch:
