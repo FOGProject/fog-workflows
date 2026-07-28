@@ -118,32 +118,25 @@ jobs:
           computed=$(sh .githooks/lib/fog-version.sh "${{ matrix.branch }}")
           echo "version=$(printf '%s\n' "$computed" | sed -n '1p')" >> "$GITHUB_OUTPUT"
           echo "channel=$(printf '%s\n' "$computed" | sed -n '2p')" >> "$GITHUB_OUTPUT"
+          echo "drifted=$(printf '%s\n' "$computed" | sed -n '3p')" >> "$GITHUB_OUTPUT"
 
-      - name: Apply computed FOG_VERSION / FOG_CHANNEL
-        run: |
-          sh .githooks/lib/apply-fog-version.sh \
-            "${{ steps.compute.outputs.version }}" \
-            "${{ steps.compute.outputs.channel }}"
-
-      - name: Commit and push if the committed version is stale
+      - name: Apply, commit, and push if stale
         id: commit
+        if: steps.compute.outputs.drifted == 'true'
         env:
           BOT_SLUG: ${{ steps.app-token.outputs.app-slug }}
         run: |
           set -e
           system_file="packages/web/lib/fog/system.class.php"
+          old_version=$(grep "define('FOG_VERSION'" "$system_file" | sed "s/.*FOG_VERSION', '\([^']*\)');/\1/")
+          echo "old_version=$old_version" >> "$GITHUB_OUTPUT"
 
-          if git diff --quiet -- "$system_file"; then
-            echo "Version already correct on ${{ matrix.branch }} - nothing to do."
-            echo "fixed=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
+          sh .githooks/lib/apply-fog-version.sh \
+            "${{ steps.compute.outputs.version }}" \
+            "${{ steps.compute.outputs.channel }}"
 
           echo "Version drift detected on ${{ matrix.branch }}:"
           git diff -- "$system_file"
-
-          old_version=$(git show HEAD:"$system_file" | grep "define('FOG_VERSION'" | sed "s/.*FOG_VERSION', '\([^']*\)');/\1/")
-          echo "old_version=$old_version" >> "$GITHUB_OUTPUT"
 
           git config user.name "${BOT_SLUG}[bot]"
           git config user.email "${BOT_SLUG}[bot]@users.noreply.github.com"
@@ -151,7 +144,6 @@ jobs:
           git add "$system_file"
           git commit -m "chore: fix stale FOG_VERSION/FOG_CHANNEL on ${{ matrix.branch }}"
           git push origin "HEAD:${{ matrix.branch }}"
-          echo "fixed=true" >> "$GITHUB_OUTPUT"
 
       - name: Summarize
         if: always()
@@ -159,11 +151,11 @@ jobs:
           {
             echo "## \`${{ matrix.branch }}\`"
             echo ""
-            if [ "${{ steps.commit.outputs.fixed }}" = "true" ]; then
-              echo "🔧 **Fixed** - \`${{ steps.commit.outputs.old_version }}\` → \`${{ steps.compute.outputs.version }}\` (channel: ${{ steps.compute.outputs.channel }})"
-            elif [ "${{ steps.commit.outputs.fixed }}" = "false" ]; then
+            if [ "${{ steps.compute.outputs.drifted }}" != "true" ]; then
               echo "✅ Already correct - \`${{ steps.compute.outputs.version }}\` (channel: ${{ steps.compute.outputs.channel }})"
+            elif [ "${{ steps.commit.outcome }}" = "success" ]; then
+              echo "🔧 **Fixed** - \`${{ steps.commit.outputs.old_version }}\` → \`${{ steps.compute.outputs.version }}\` (channel: ${{ steps.compute.outputs.channel }})"
             else
-              echo "⚠️ Did not complete - check the job log."
+              echo "⚠️ Drift detected but the fix did not complete - check the job log."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
