@@ -1,0 +1,132 @@
+name: Check FOG version
+
+# Reusable workflow backing:
+#  - the push-triggered stub in FOGProject/fogproject's
+#    .github/workflows/check-fog-version.yml (instant, per-branch), and
+#  - check-fog-version-sweep.yml in this repo (daily, all watched branches -
+#    a failsafe catch-all for anything the push trigger misses, e.g. a
+#    missed webhook delivery or an Actions outage during the original push).
+# Also directly workflow_dispatch-able against a single branch by hand.
+# See fog-docs' Development section for the full picture of why this is
+# split across two repos.
+#
+# Recomputes FOG_VERSION/FOG_CHANNEL using the same formula as fogproject's
+# .githooks/pre-commit. That hook is client-side and never runs on a PR merged
+# via GitHub's web UI, so this independently recomputes what the version
+# should be and, if it disagrees with what's actually committed, pushes the
+# fix directly to the branch that drifted - no fix branch, no PR, since this
+# is a mechanical correction of the same kind the hook already makes locally.
+#
+# Never invoked for `stable` - that branch's version is owned entirely by
+# stable-releases.yml's release flow.
+
+on:
+  workflow_call:
+    inputs:
+      branch:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "fogproject branch to check"
+        required: true
+        type: string
+
+jobs:
+  check-version:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+          private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
+          owner: FOGProject
+          repositories: "fogproject"
+
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: FOGProject/fogproject
+          ref: ${{ inputs.branch }}
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Fetch master (needed by the version formula)
+        run: git fetch origin master:master
+
+      - name: Compute expected FOG_VERSION / FOG_CHANNEL
+        env:
+          GITBRANCH: ${{ inputs.branch }}
+        run: |
+          set -e
+          system_file="packages/web/lib/fog/system.class.php"
+
+          gitcom=$(git rev-list --tags --no-walk --max-count=1)
+          gitcount=$(git rev-list master..HEAD --count)
+
+          branchon=$(echo "$GITBRANCH" | awk -F'-' '{print $1}')
+          branchend=$(echo "$GITBRANCH" | awk -F'-' '{print $2}')
+
+          current_version=$(grep "define('FOG_VERSION'" "$system_file" | sed "s/.*FOG_VERSION', '\([^']*\)');/\1/")
+          current_channel=$(grep "define('FOG_CHANNEL'" "$system_file" | sed "s/.*FOG_CHANNEL', '\([^']*\)');/\1/")
+
+          verbegin=""
+          channel="$current_channel"
+          trunkversion="$current_version"
+
+          case "$branchon" in
+              dev)
+                  tagversion=$(git describe --tags "$gitcom")
+                  baseversion=${tagversion%.*}
+                  trunkversion="${baseversion}.${gitcount}"
+                  channel="Patches"
+                  ;;
+              working)
+                  verbegin="${branchend}.0-beta"
+                  trunkversion="${verbegin}.${gitcount}"
+                  channel="Beta"
+                  ;;
+              rc)
+                  channel="Release Candidate"
+                  version_prefix="${branchend}.0-RC"
+                  n=$(printf '%s\n' "$current_version" | sed -n "s/^${version_prefix}-\([0-9][0-9]*\)\$/\1/p")
+                  if [ -n "$n" ]; then
+                      trunkversion="${version_prefix}-$((n + 1))"
+                  else
+                      trunkversion="${version_prefix}-1"
+                  fi
+                  ;;
+              feature)
+                  verbegin="${branchend}.0-feature"
+                  trunkversion="${verbegin}.${gitcount}"
+                  channel="Feature"
+                  ;;
+          esac
+
+          sed -i "s/define('FOG_VERSION',.*);/define('FOG_VERSION', '$trunkversion');/g" "$system_file"
+          sed -i "s/define('FOG_CHANNEL',.*);/define('FOG_CHANNEL', '$channel');/g" "$system_file"
+
+      - name: Commit and push if the committed version is stale
+        env:
+          GITBRANCH: ${{ inputs.branch }}
+          BOT_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -e
+          system_file="packages/web/lib/fog/system.class.php"
+
+          if git diff --quiet -- "$system_file"; then
+            echo "Version already correct on $GITBRANCH - nothing to do."
+            exit 0
+          fi
+
+          echo "Version drift detected on $GITBRANCH:"
+          git diff -- "$system_file"
+
+          git config user.name "${BOT_SLUG}[bot]"
+          git config user.email "${BOT_SLUG}[bot]@users.noreply.github.com"
+
+          git add "$system_file"
+          git commit -m "chore: fix stale FOG_VERSION/FOG_CHANNEL on ${GITBRANCH}"
+          git push origin "HEAD:${GITBRANCH}"
