@@ -34,6 +34,12 @@ name: Check FOG version
 # $GITHUB_STEP_SUMMARY, and GitHub renders every job's summary together on
 # the run's Summary page - so the state of every watched branch is visible
 # at a glance from one run, with no need to open individual job logs.
+#
+# dev-branch and working-1.6 also get a small JSON badge file committed
+# into this repo (badges/<branch>.json), read by a shields.io endpoint
+# badge in fogproject's README - see that README for the rendered badges.
+# stable's badge is written by stable-releases.yml instead, since that's
+# the only workflow that ever changes stable's version.
 
 on:
   schedule:
@@ -48,6 +54,9 @@ on:
 concurrency:
   group: fog-version-check
   cancel-in-progress: false
+
+permissions:
+  contents: write
 
 jobs:
   discover-branches:
@@ -147,6 +156,30 @@ jobs:
           git add "$system_file"
           git commit -m "chore: fix stale FOG_VERSION/FOG_CHANNEL on ${{ matrix.branch }}"
           git push origin "HEAD:${{ matrix.branch }}"
+
+      - name: Update version badge
+        if: contains(fromJson('["dev-branch", "working-1.6"]'), matrix.branch)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          path="badges/${{ matrix.branch }}.json"
+          body=$(jq -n \
+            --arg label "${{ matrix.branch }}" \
+            --arg message "${{ steps.compute.outputs.version }}" \
+            '{schemaVersion: 1, label: $label, message: $message, color: "blue", cacheSeconds: 3600}')
+          content=$(printf '%s' "$body" | base64 -w0)
+
+          sha=$(gh api "repos/FOGProject/fog-workflows/contents/$path" --jq .sha 2>/dev/null || true)
+          if [ -n "$sha" ]; then
+            gh api "repos/FOGProject/fog-workflows/contents/$path" -X PUT \
+              -f message="chore: update ${{ matrix.branch }} version badge" \
+              -f content="$content" -f sha="$sha" >/dev/null
+          else
+            gh api "repos/FOGProject/fog-workflows/contents/$path" -X PUT \
+              -f message="chore: add ${{ matrix.branch }} version badge" \
+              -f content="$content" >/dev/null
+          fi
 
       - name: Summarize
         if: always()
