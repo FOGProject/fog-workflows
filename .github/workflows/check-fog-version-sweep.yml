@@ -57,5 +57,6 @@ jobs:
       matrix:
         branch: ${{ fromJson(needs.discover.outputs.branches) }}
     uses: ./.github/workflows/check-fog-version.yml
+    secrets: inherit
     with:
       branch: ${{ matrix.branch }}
