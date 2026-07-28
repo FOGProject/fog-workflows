@@ -1,24 +1,35 @@
 name: Bootstrap FOG version check stub
 
-# Reusable workflow backing fogproject's create-triggered bootstrap stub
-# (.github/workflows/bootstrap-fog-version-check-stub.yml on fogproject's
-# default branch). Fires whenever a new branch is created in fogproject.
+# Single-branch worker, called by bootstrap-fog-version-check-stub-sweep.yml
+# for each fogproject branch missing the stub (also runnable by hand via
+# workflow_dispatch against one branch).
 #
 # check-fog-version.yml's push trigger only fires on a branch that already
 # has a copy of that stub file committed to it. New feature-*/rc-* branches
 # cut from dev-branch inherit it for free once dev-branch has it, but a
 # branch created from anywhere else (or before dev-branch had it) would
 # silently never be watched. This copies the canonical stub - whatever is
-# currently committed on dev-branch - onto the new branch directly, if it
+# currently committed on dev-branch - onto the given branch directly, if it
 # matches the watched patterns and doesn't already have it.
 #
 # Never touches `stable` (excluded from the watched patterns, same as
 # check-fog-version.yml itself) or any branch outside those patterns.
+# Deliberately not triggered by anything in fogproject itself (unlike
+# check-fog-version.yml's push stub) - GitHub only resolves a `create`-event
+# workflow from fogproject's default branch, which is `stable`, and this
+# repo's automation is kept off of `stable` entirely. The sweep workflow
+# polls instead.
 
 on:
   workflow_call:
     inputs:
       branch:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "fogproject branch to bootstrap the stub onto"
         required: true
         type: string
 
