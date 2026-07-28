@@ -1,0 +1,61 @@
+name: Sweep FOG version check across all watched branches
+
+# Failsafe catch-all, running daily in addition to the push-triggered stub in
+# fogproject. The push trigger should catch essentially everything, but this
+# covers anything it misses - a missed webhook delivery, an Actions outage
+# during the original push, a branch whose stub hadn't been bootstrapped yet
+# at push time, etc.
+#
+# Lists fogproject branches, filters to the ones check-fog-version.yml
+# watches (working-1.6/dev-branch/rc-*/feature-*, `stable` excluded - owned
+# by stable-releases.yml's release flow), and runs the real check-and-fix
+# workflow against every one of them, whether or not the push stub is even
+# present there yet.
+
+on:
+  schedule:
+    - cron: "45 4 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  discover:
+    runs-on: ubuntu-24.04
+    outputs:
+      branches: ${{ steps.discover.outputs.branches }}
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+          private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
+          owner: FOGProject
+          repositories: "fogproject"
+
+      - name: List watched branches
+        id: discover
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+        run: |
+          set -e
+          all_branches=$(gh api repos/FOGProject/fogproject/branches --paginate --jq '.[].name')
+
+          watched=()
+          for b in $all_branches; do
+            case "$b" in
+                working-1.6|dev-branch|rc-*|feature-*) watched+=("$b") ;;
+            esac
+          done
+
+          json=$(printf '%s\n' "${watched[@]:-}" | jq -R . | jq -sc 'map(select(length > 0))')
+          echo "branches=$json" >> "$GITHUB_OUTPUT"
+          echo "Watched branches: $json"
+
+  check-version:
+    needs: discover
+    if: needs.discover.outputs.branches != '[]'
+    strategy:
+      matrix:
+        branch: ${{ fromJson(needs.discover.outputs.branches) }}
+    uses: ./.github/workflows/check-fog-version.yml
+    with:
+      branch: ${{ matrix.branch }}

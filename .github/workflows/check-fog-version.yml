@@ -1,8 +1,14 @@
 name: Check FOG version
 
-# Reusable workflow backing the push-triggered stub in FOGProject/fogproject's
-# .github/workflows/check-fog-version.yml (see fog-docs' Development section
-# for the full picture of why this is split across two repos).
+# Reusable workflow backing:
+#  - the push-triggered stub in FOGProject/fogproject's
+#    .github/workflows/check-fog-version.yml (instant, per-branch), and
+#  - check-fog-version-sweep.yml in this repo (daily, all watched branches -
+#    a failsafe catch-all for anything the push trigger misses, e.g. a
+#    missed webhook delivery or an Actions outage during the original push).
+# Also directly workflow_dispatch-able against a single branch by hand.
+# See fog-docs' Development section for the full picture of why this is
+# split across two repos.
 #
 # Recomputes FOG_VERSION/FOG_CHANNEL using the same formula as fogproject's
 # .githooks/pre-commit. That hook is client-side and never runs on a PR merged
@@ -18,6 +24,12 @@ on:
   workflow_call:
     inputs:
       branch:
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "fogproject branch to check"
         required: true
         type: string
 
