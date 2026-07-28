@@ -26,6 +26,11 @@ name: Check FOG version
 #
 # Never invoked for `stable` - that branch's version is owned entirely by
 # stable-releases.yml's release flow.
+#
+# Each matrix instance writes its own outcome (fixed / already correct) to
+# $GITHUB_STEP_SUMMARY, and GitHub renders every job's summary together on
+# the run's Summary page - so the state of every watched branch is visible
+# at a glance from one run, with no need to open individual job logs.
 
 on:
   schedule:
@@ -71,6 +76,16 @@ jobs:
           fi
           echo "branches=$branches" >> "$GITHUB_OUTPUT"
 
+          {
+            echo "## Watched branches"
+            echo ""
+            if [ "$branches" = "[]" ]; then
+              echo "None found."
+            else
+              printf '%s\n' "$branches" | jq -r '.[] | "- `\(.)`"'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
   check-version:
     needs: discover-branches
     if: needs.discover-branches.outputs.branches != '[]'
@@ -111,6 +126,7 @@ jobs:
             "${{ steps.compute.outputs.channel }}"
 
       - name: Commit and push if the committed version is stale
+        id: commit
         env:
           BOT_SLUG: ${{ steps.app-token.outputs.app-slug }}
         run: |
@@ -119,11 +135,15 @@ jobs:
 
           if git diff --quiet -- "$system_file"; then
             echo "Version already correct on ${{ matrix.branch }} - nothing to do."
+            echo "fixed=false" >> "$GITHUB_OUTPUT"
             exit 0
           fi
 
           echo "Version drift detected on ${{ matrix.branch }}:"
           git diff -- "$system_file"
+
+          old_version=$(git show HEAD:"$system_file" | grep "define('FOG_VERSION'" | sed "s/.*FOG_VERSION', '\([^']*\)');/\1/")
+          echo "old_version=$old_version" >> "$GITHUB_OUTPUT"
 
           git config user.name "${BOT_SLUG}[bot]"
           git config user.email "${BOT_SLUG}[bot]@users.noreply.github.com"
@@ -131,3 +151,19 @@ jobs:
           git add "$system_file"
           git commit -m "chore: fix stale FOG_VERSION/FOG_CHANNEL on ${{ matrix.branch }}"
           git push origin "HEAD:${{ matrix.branch }}"
+          echo "fixed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "## \`${{ matrix.branch }}\`"
+            echo ""
+            if [ "${{ steps.commit.outputs.fixed }}" = "true" ]; then
+              echo "🔧 **Fixed** - \`${{ steps.commit.outputs.old_version }}\` → \`${{ steps.compute.outputs.version }}\` (channel: ${{ steps.compute.outputs.channel }})"
+            elif [ "${{ steps.commit.outputs.fixed }}" = "false" ]; then
+              echo "✅ Already correct - \`${{ steps.compute.outputs.version }}\` (channel: ${{ steps.compute.outputs.channel }})"
+            else
+              echo "⚠️ Did not complete - check the job log."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
