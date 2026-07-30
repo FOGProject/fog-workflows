@@ -7,6 +7,11 @@ on:
 
 jobs:
 
+  update-dev-branch-version-if-needed:
+    uses: ./.github/workflows/check-fog-version.yml
+    with:
+      branch: "dev-branch"
+  
   create-release-pull-request:
     runs-on: ubuntu-24.04
     outputs:
