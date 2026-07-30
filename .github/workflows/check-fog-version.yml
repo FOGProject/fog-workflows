@@ -44,6 +44,12 @@ name: Check FOG version
 on:
   schedule:
     - cron: "10 10 * * *"
+  workflow_call:
+    inputs:
+      branch:
+        description: "Single fogproject branch to check (omit to sweep all watched branches)"
+        required: false
+        type: string
   workflow_dispatch:
     inputs:
       branch:
