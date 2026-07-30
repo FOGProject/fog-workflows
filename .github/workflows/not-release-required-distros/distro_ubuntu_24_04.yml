@@ -1,0 +1,12 @@
+name: Ubuntu 24.04
+
+on:
+  workflow_call: 
+  workflow_dispatch:
+
+jobs:
+  ubuntu-24-04:
+    uses: ./.github/workflows/reusable_distro_workflow.yml
+    with:
+      distro: "docker.io/library/ubuntu:24.04"
+      package_man: "apt"

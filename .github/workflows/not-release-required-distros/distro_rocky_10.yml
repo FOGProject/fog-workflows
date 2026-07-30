@@ -1,0 +1,12 @@
+name: Rocky 10
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  rocky-10:
+    uses: ./.github/workflows/reusable_distro_workflow.yml
+    with:
+      distro: "quay.io/rockylinux/rockylinux:10-minimal"
+      package_man: "dnf"

@@ -114,11 +114,18 @@ default `GITHUB_TOKEN`.
     `run_all_distros.yml` discovers new `distro_*.yml` files automatically.
 
 - **`run_all_distros.yml`** — orchestrator, `workflow_dispatch`-only. Builds a matrix by
-  listing every `distro_*.yml` file in `.github/workflows/`, dispatches each one via
-  `gh workflow run`, then polls `gh run list` / `gh run view` for each to reach a terminal
-  `conclusion`. At least one distro must pass for the overall run to succeed (see
+  listing every `distro_*.yml` file directly in `.github/workflows/` (a non-recursive glob,
+  so it deliberately does **not** pick up `not-release-required-distros/`), dispatches each
+  one via `gh workflow run`, then polls `gh run list` / `gh run view` for each to reach a
+  terminal `conclusion`. At least one distro must pass for the overall run to succeed (see
   `aggregate-results` job) — this is deliberately lenient because flaky/rate-limited base
   images shouldn't block a release on their own.
+
+- **`not-release-required-distros/distro_*.yml`** — additional per-distro wrappers (Fedora,
+  Rocky, extra Ubuntu versions) that are *not* part of the release-gating matrix — they exist
+  for standalone `workflow_dispatch` runs from the Actions tab only, since `run_all_distros.yml`
+  doesn't glob into subdirectories. Otherwise identical in shape to the top-level `distro_*.yml`
+  wrappers.
 
 ## Conventions to preserve when editing workflows
 
