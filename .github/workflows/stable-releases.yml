@@ -77,63 +77,51 @@ jobs:
     needs: create-release-pull-request
     if: needs.create-release-pull-request.outputs.skip_release != 'true'
     runs-on: ubuntu-24.04
+    permissions:
+      actions: write
     outputs:
       release_tag: ${{ needs.create-release-pull-request.outputs.release_tag }}
       previous_tag: ${{ needs.create-release-pull-request.outputs.previous_tag }}
 
     steps:
-      - uses: actions/create-github-app-token@v3
-        id: app-token
-        with:
-          client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
-          private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
-          owner: FOGProject
-          repositories: "fogproject-install-validation"
-
       - name: Call main workflow that calls all the distros
-        run: gh workflow run --repo FOGProject/fogproject-install-validation run_all_distros.yml
+        run: gh workflow run run_all_distros.yml
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   check-all-tests-completed-successfully:
     needs: run-install-tests
     runs-on: ubuntu-24.04
+    permissions:
+      actions: read
     outputs:
       release_tag: ${{ needs.run-install-tests.outputs.release_tag }}
       previous_tag: ${{ needs.run-install-tests.outputs.previous_tag }}
 
     steps:
-      - uses: actions/create-github-app-token@v3
-        id: app-token
-        with:
-          client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
-          private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
-          owner: FOGProject
-          repositories: "fogproject-install-validation"
-
       - name: Wait a minute for the runs to start
         run: sleep 60
 
       - name: Get run IDs
         run: |
-          run_id=$(gh run list --repo FOGProject/fogproject-install-validation --workflow run_all_distros.yml --json databaseId --limit 1 | jq -r '.[0].databaseId')
+          run_id=$(gh run list --workflow run_all_distros.yml --json databaseId --limit 1 | jq -r '.[0].databaseId')
           echo "RUN_ID=$run_id" >> $GITHUB_ENV
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Check if distro workflow passed or failed
         run: |
           run_status=""
           while [[ $run_status != "success" && $run_status != "failure" ]]; do
             sleep 15
-            run_status=$(gh run view --repo FOGProject/fogproject-install-validation ${{ env.RUN_ID }} --exit-status --json conclusion | jq -r '.conclusion')
+            run_status=$(gh run view ${{ env.RUN_ID }} --exit-status --json conclusion | jq -r '.conclusion')
           done
 
           if [[ $run_status == "failure" ]]; then
             exit 1
           fi
         env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
   merge-after-all-tests-passed:
     needs: check-all-tests-completed-successfully
