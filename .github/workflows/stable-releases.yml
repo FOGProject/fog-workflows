@@ -13,6 +13,7 @@ jobs:
       branch: "dev-branch"
   
   create-release-pull-request:
+    needs: update-dev-branch-version-if-needed
     runs-on: ubuntu-24.04
     outputs:
       skip_release: ${{ steps.create_pr.outputs.skip_release }}
