@@ -11,6 +11,7 @@ jobs:
     uses: ./.github/workflows/check-fog-version.yml
     with:
       branch: "dev-branch"
+    secrets: inherit
   
   create-release-pull-request:
     needs: update-dev-branch-version-if-needed
