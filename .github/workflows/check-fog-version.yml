@@ -86,7 +86,7 @@ jobs:
         run: |
           set -e
           if [ -n "$SINGLE_BRANCH" ]; then
-            branches="[\"$SINGLE_BRANCH\"]"
+            branches=$(jq -n --arg branch "$SINGLE_BRANCH" -c '[$branch]')
           else
             all=$(gh api repos/FOGProject/fogproject/branches --paginate --jq '.[].name')
             matched=$(printf '%s\n' "$all" | grep -E '^(working-1\.6|dev-branch)$|^(rc-|feature-)' || true)
