@@ -99,6 +99,8 @@ jobs:
             echo ""
             if [ "$branches" = "[]" ]; then
               echo "None found."
+            elif [ -n "$SINGLE_BRANCH" ]; then
+              printf '%s\n' "$branches"
             else
               printf '%s\n' "$branches" | jq -r '.[] | "- `\(.)`"'
             fi
