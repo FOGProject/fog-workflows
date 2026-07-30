@@ -1,0 +1,10 @@
+name: TEMP test workflow_call branch input (delete after debugging)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test:
+    uses: ./.github/workflows/check-fog-version.yml
+    with:
+      branch: "dev-branch"
