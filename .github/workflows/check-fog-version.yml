@@ -127,7 +127,7 @@ jobs:
         id: compute
         run: |
           set -e
-          computed=$(sh .githooks/lib/fog-version.sh "${{ matrix.branch }}")
+          computed=$(sh .githooks/lib/fog-version.sh "${{ matrix.branch }}" 0)
           echo "version=$(printf '%s\n' "$computed" | sed -n '1p')" >> "$GITHUB_OUTPUT"
           echo "channel=$(printf '%s\n' "$computed" | sed -n '2p')" >> "$GITHUB_OUTPUT"
           echo "drifted=$(printf '%s\n' "$computed" | sed -n '3p')" >> "$GITHUB_OUTPUT"
