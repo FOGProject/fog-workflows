@@ -42,9 +42,14 @@ reading Actions run logs/summaries in GitHub.
 `check-fog-version.yml`, `stable-releases.yml`, and `fog-release-immortality.yml` authenticate
 to the `FOGProject` org as a GitHub App (`create-github-app-token` using
 `vars.FOG_WORKFLOWS_APPID` / `secrets.FOG_WORKFLOWS_PRIVATE_KEY`), not the default
-`GITHUB_TOKEN`, because they need to act across repos (`fogproject` and this repo itself).
-The distro install-validation workflows below don't touch any other repo, so they use the
-default `GITHUB_TOKEN`.
+`GITHUB_TOKEN`. This is the standard for every job in this repo's centralized workflows, not
+just cross-repo ones: it means every action taken by these unified workflows — dispatching
+`run_all_distros.yml`, commits, PRs, releases — is consistently attributed to the same GitHub
+App bot identity, rather than a mix of the bot and the generic `github-actions[bot]` depending
+on which repo happens to be involved. Even same-repo-only jobs (e.g. the `run-install-tests` /
+`check-all-tests-completed-successfully` jobs that just dispatch/poll `run_all_distros.yml`
+here) get their own `create-github-app-token` step scoped to `fog-workflows` for this reason —
+don't "simplify" those back to the default `GITHUB_TOKEN` just because the call is same-repo.
 
 - **`check-fog-version.yml`** — the core drift-correction workflow. Runs daily
   (`10 10 * * *`) and sweeps every "watched" `fogproject` branch (`dev-branch`, `working-1.6`,
@@ -81,11 +86,10 @@ default `GITHUB_TOKEN`.
   6. Updates `badges/stable.json` here, then opens/merges a `stable` → `dev-branch` PR to sync
      the release commit back.
   7. Announces success/failure to Discord (`secrets.DISCORD_WEBHOOK`) at the relevant steps.
-  - Every job that touches `fogproject` needs its own App token scoped to that repo — tokens
-    aren't shared across jobs. The `run-install-tests` / `check-all-tests-completed-successfully`
-    jobs just dispatch/poll `run_all_distros.yml` in this same repo, so they use the default
-    `GITHUB_TOKEN` (this repo has `default_workflow_permissions: write`, so `actions: write`
-    is available) instead.
+  - Every job gets its own App token scoped to whichever repo it actually touches — tokens
+    aren't shared across jobs. `run-install-tests` / `check-all-tests-completed-successfully`
+    only dispatch/poll `run_all_distros.yml` in this same repo, so their token is scoped to
+    `fog-workflows` itself rather than `fogproject`.
 
 - **`fog-release-immortality.yml`** — monthly no-op (`workflow_dispatch` + `20 0 1 * *`) that
   exists solely to keep GitHub from disabling the *other* scheduled workflows' `schedule`
@@ -129,10 +133,12 @@ default `GITHUB_TOKEN`.
 
 ## Conventions to preserve when editing workflows
 
-- Prefer a GitHub App token (`create-github-app-token`) scoped to only the repositories a job
-  actually touches, over the default `GITHUB_TOKEN` or a broadly-scoped PAT, for anything that
-  crosses into `fogproject`. Jobs that only act within this repo (e.g. the install-validation
-  workflows) should just use the default `GITHUB_TOKEN`.
+- Always use a GitHub App token (`create-github-app-token`), scoped to only the repositories a
+  job actually touches, instead of the default `GITHUB_TOKEN` or a broadly-scoped PAT — even
+  for jobs that only act within this repo. This is a deliberate standard, not an oversight: it
+  keeps every action across all of this repo's unified/centralized workflows attributed to the
+  same GitHub App bot identity, so run history and audit trails stay consistent regardless of
+  which repo a given job happens to touch.
 - Don't reintroduce push-triggered cross-repo workflows for version syncing — use scheduled
   and `workflow_call`/`workflow_dispatch` triggers instead, per the incident documented in
   `check-fog-version.yml`.
