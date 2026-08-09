@@ -145,11 +145,26 @@ jobs:
           php-cs-fixer --version
 
       - name: Regenerate translation template
+        id: lang
         run: |
           set -e
           # The same script .githooks/pre-commit calls, run from fogproject's own
           # checkout rather than reimplemented here -- so the hook and this job
           # cannot produce different output for the same tree.
+          #
+          # Branches cut before that script existed do not carry it, and rc-* and
+          # feature-* branches can be cut from anywhere -- so its absence is a
+          # normal state, not an error. Skip and say so rather than failing the
+          # job: a workflow that goes red on branches nobody can fix is one
+          # people learn to ignore. Deliberately NOT falling back to inlining the
+          # commands here, because a second copy of them is exactly the drift
+          # this shared script exists to prevent.
+          if [ ! -f .githooks/lib/update-language.sh ]; then
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::.githooks/lib/update-language.sh is not on this branch; skipping translation regeneration."
+            exit 0
+          fi
+          echo "skipped=false" >> "$GITHUB_OUTPUT"
           sh .githooks/lib/update-language.sh "$PWD"
 
       - name: Apply PSR2 formatting
@@ -204,5 +219,9 @@ jobs:
               echo "✅ Already current - nothing to regenerate."
             else
               echo "⚠️ The sync did not complete - check the job log."
+            fi
+            if [ "${{ steps.lang.outputs.skipped }}" = "true" ]; then
+              echo ""
+              echo "ℹ️ Translation regeneration was skipped - this branch predates \`.githooks/lib/update-language.sh\`. PSR2 formatting still ran."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
