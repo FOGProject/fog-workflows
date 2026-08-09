@@ -1,0 +1,208 @@
+name: Sync generated files
+
+# Daily sweep that regenerates fogproject's committed build artifacts - the
+# gettext .pot/.po files and PSR2 formatting - and pushes a fixup commit when
+# they are stale.
+#
+# WHY THIS EXISTS
+#
+# Those artifacts are produced by .githooks/pre-commit, which runs on the
+# committer's machine. A hook cannot install anything on a machine it does not
+# control, so it skips (loudly - see .githooks/lib/require-tools.sh) when
+# php-cs-fixer or gettext is absent. That makes a commit from a machine without
+# the tools silently incomplete, and the omission then surfaces later as a large
+# unrelated diff attributed to whoever next commits from a machine that has
+# them. Availability is only half of it: two machines that both have the tools
+# still disagree when the versions differ, which is why php-cs-fixer is pinned
+# below rather than taken from whatever the runner happens to ship.
+#
+# Regenerating centrally makes the tooling requirement advisory rather than
+# load-bearing: contribute from anything, and this corrects it once a day.
+#
+# WHY IT IS A SCHEDULE AND NOT A PUSH TRIGGER
+#
+# The same reason check-fog-version.yml is. A push-triggered stub living in
+# fogproject and calling a reusable workflow here means the bot's own fixup push
+# re-triggers the stub, which re-triggers this, which pushes another fixup. That
+# exact loop put 30 commits on dev-branch in ~20 minutes before it was caught. A
+# cron tick cannot look at what was last pushed, so it cannot feed itself.
+#
+# ORDERING AGAINST check-fog-version.yml
+#
+# Runs at 09:40 UTC, 30 minutes ahead of the version sweep's 10:10. A commit
+# pushed from here changes the branch's commit count, which is what FOG_VERSION
+# is derived from - so the version sweep must see this commit rather than race
+# it. Going first means the version is correct within the same half hour instead
+# of lagging a day.
+#
+# Deliberately a SEPARATE concurrency group from that workflow. Sharing the
+# group would look tidier but would deadlock the moment this one ever calls it
+# as a reusable workflow: the callee would queue behind the caller that is
+# waiting on it.
+#
+# Never touches `stable` - the branch filter below excludes it, exactly as the
+# version sweep does, because that branch's contents are owned by
+# stable-releases.yml.
+
+on:
+  schedule:
+    - cron: "40 9 * * *"
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Single fogproject branch to sync (omit to sweep all watched branches)"
+        required: false
+        type: string
+
+concurrency:
+  group: fog-generated-sync
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  # Pinned, not "latest". An unpinned formatter is a second source of drift:
+  # 3.x and 4.x disagree about the same file, so an unpinned CI run would
+  # reformat whatever the previous run wrote. Bump this deliberately, and expect
+  # one large commit when you do.
+  PHP_CS_FIXER_VERSION: "3.62.0"
+
+jobs:
+  discover-branches:
+    runs-on: ubuntu-24.04
+    outputs:
+      branches: ${{ steps.list.outputs.branches }}
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+          private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
+          owner: FOGProject
+          repositories: "fogproject"
+
+      - name: List watched branches
+        id: list
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SINGLE_BRANCH: ${{ inputs.branch }}
+        run: |
+          set -e
+          if [ -n "$SINGLE_BRANCH" ]; then
+            branches=$(jq -n --arg branch "$SINGLE_BRANCH" -c '[$branch]')
+          else
+            all=$(gh api repos/FOGProject/fogproject/branches --paginate --jq '.[].name')
+            matched=$(printf '%s\n' "$all" | grep -E '^(working-1\.6|dev-branch)$|^(rc-|feature-)' || true)
+            branches=$(printf '%s\n' "$matched" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          fi
+          echo "branches=$branches" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Watched branches"
+            echo ""
+            if [ "$branches" = "[]" ]; then
+              echo "None found."
+            else
+              printf '%s\n' "$branches" | jq -r '.[] | "- `\(.)`"'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  sync:
+    needs: discover-branches
+    if: needs.discover-branches.outputs.branches != '[]'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ${{ fromJson(needs.discover-branches.outputs.branches) }}
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+          private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
+          owner: FOGProject
+          repositories: "fogproject"
+
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: FOGProject/fogproject
+          ref: ${{ matrix.branch }}
+          # Shallow is fine here: unlike the version sweep this needs no tags and
+          # no commit counting, only the tree at the branch tip.
+          fetch-depth: 1
+
+      - name: Install tooling
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gettext php-cli
+          curl -sSL -o /usr/local/bin/php-cs-fixer \
+            "https://github.com/PHP-CS-Fixer/PHP-CS-Fixer/releases/download/v${PHP_CS_FIXER_VERSION}/php-cs-fixer.phar"
+          chmod +x /usr/local/bin/php-cs-fixer
+          php-cs-fixer --version
+
+      - name: Regenerate translation template
+        run: |
+          set -e
+          # The same script .githooks/pre-commit calls, run from fogproject's own
+          # checkout rather than reimplemented here -- so the hook and this job
+          # cannot produce different output for the same tree.
+          sh .githooks/lib/update-language.sh "$PWD"
+
+      - name: Apply PSR2 formatting
+        env:
+          # The phar refuses to run as a non-interactive "risky" job otherwise.
+          PHP_CS_FIXER_IGNORE_ENV: "1"
+        run: |
+          set -e
+          # Whole tree, deliberately. The hook fixes only the files staged for a
+          # given commit, which is right locally but leaves anything a
+          # tool-less machine committed untouched. This is the sweep that
+          # catches those.
+          #
+          # No `|| true`: in fix mode (as opposed to --dry-run) the fixer exits
+          # 0 whether or not it changed anything, so a non-zero here is a real
+          # failure -- a parse error or a missing extension -- and swallowing it
+          # would mean committing a half-formatted tree and reporting success.
+          php-cs-fixer fix packages/web --rules=@PSR2 --quiet
+
+      - name: Commit and push if stale
+        id: commit
+        env:
+          BOT_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -e
+          if git diff --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing to do on ${{ matrix.branch }}."
+            exit 0
+          fi
+
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+          echo "files=$(git diff --name-only | wc -l)" >> "$GITHUB_OUTPUT"
+          git diff --stat
+
+          git config user.name "${BOT_SLUG}[bot]"
+          git config user.email "${BOT_SLUG}[bot]@users.noreply.github.com"
+
+          git add -A
+          git commit -m "Generated Files Sync: regenerate translations and PSR2 formatting on ${{ matrix.branch }}"
+          git push origin "HEAD:${{ matrix.branch }}"
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "## \`${{ matrix.branch }}\`"
+            echo ""
+            if [ "${{ steps.commit.outputs.changed }}" = "true" ]; then
+              echo "🔧 **Regenerated** - ${{ steps.commit.outputs.files }} file(s) were stale and have been committed."
+            elif [ "${{ steps.commit.outcome }}" = "success" ]; then
+              echo "✅ Already current - nothing to regenerate."
+            else
+              echo "⚠️ The sync did not complete - check the job log."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
