@@ -7,14 +7,14 @@ on:
 
 jobs:
 
-  update-dev-branch-version-if-needed:
-    uses: ./.github/workflows/check-fog-version.yml
+  sync-and-check-dev-branch-before-release:
+    uses: ./.github/workflows/update-lang-fix-psr-and-sync-version.yml
     with:
       branch: "dev-branch"
     secrets: inherit
   
   create-release-pull-request:
-    needs: update-dev-branch-version-if-needed
+    needs: sync-and-check-dev-branch-before-release
     runs-on: ubuntu-24.04
     outputs:
       skip_release: ${{ steps.create_pr.outputs.skip_release }}
