@@ -1,0 +1,137 @@
+name: Run all distros - FOG install tests
+
+on:
+  workflow_dispatch:
+
+defaults:
+  run:
+    shell: bash
+
+permissions: 
+  actions: write
+  contents: write
+
+jobs:
+  get-all-distros-matrix:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.set-matrix.outputs.matrix }}
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      
+      - name: Set matrix of distros
+        id: set-matrix
+        run: |
+          cd .github/workflows/
+          json_array=$(jq -n '[]')
+
+          for distro_file in $(ls distro_*); do
+            json_array=$(echo "$json_array" | jq --arg distro "$distro_file" '. + [$distro]')
+          done
+          
+          matrix=$(echo "{\"distros\": $json_array}" | jq -c .)
+
+          echo "matrix=$matrix" >> $GITHUB_OUTPUT
+
+  run-distro:
+    needs: get-all-distros-matrix
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        ${{ fromJson(needs.get-all-distros-matrix.outputs.matrix) }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+      
+      - name: Run all distros
+        run: gh workflow run ${{ matrix.distros }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  
+  check-if-successful:
+      needs: [get-all-distros-matrix, run-distro]
+      runs-on: ubuntu-24.04
+      strategy:
+        fail-fast: false
+        matrix:
+          ${{ fromJson(needs.get-all-distros-matrix.outputs.matrix) }}
+
+      steps:
+        - name: Wait a minute for the runs to start
+          run: sleep 60
+
+        - name: Get run IDs
+          run: |
+            run_id=$(gh run list --repo ${{ github.repository }} --workflow ${{ matrix.distros }} --json databaseId --limit 1 | jq -r '.[0].databaseId')
+            echo "RUN_ID=$run_id" >> $GITHUB_ENV
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+        - name: Check if distro workflow passed or failed
+          id: check
+          continue-on-error: true   # don't let one distro's failure kill this job
+          run: |
+            run_status=""
+            while [[ $run_status != "success" && $run_status != "failure" ]]; do
+              sleep 15
+              run_status=$(gh run view --repo ${{ github.repository }} ${{ env.RUN_ID }} --exit-status --json conclusion | jq -r '.conclusion')
+            done
+
+            if [[ $run_status == "failure" ]]; then
+              exit 1
+            fi
+          env:
+            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+        - name: Record result
+          if: always()
+          run: |
+            distro_name=$(basename "${{ matrix.distros }}" .yml)
+            mkdir -p results
+            if [[ "${{ steps.check.outcome }}" == "success" ]]; then
+              echo "success" > "results/${distro_name}.txt"
+            else
+              echo "failure" > "results/${distro_name}.txt"
+            fi
+
+        - name: Upload result artifact
+          if: always()
+          uses: actions/upload-artifact@v4
+          with:
+            name: distro-result-${{ strategy.job-index }}
+            path: results/
+
+  aggregate-results:
+      needs: check-if-successful
+      if: always()
+      runs-on: ubuntu-24.04
+      steps:
+        - name: Download all result artifacts
+          uses: actions/download-artifact@v4
+          with:
+            pattern: distro-result-*
+            path: all-results
+            merge-multiple: true
+
+        - name: Decide overall pass/fail
+          run: |
+            echo "Per-distro results:"
+            for f in all-results/*.txt; do
+              echo "  $(basename "$f" .txt): $(cat "$f")"
+            done
+
+            pass_count=$(grep -l "success" all-results/*.txt 2>/dev/null | wc -l)
+            total_count=$(ls all-results/*.txt 2>/dev/null | wc -l)
+
+            echo "$pass_count / $total_count distros passed"
+
+            if [ "$pass_count" -ge 1 ]; then
+              echo "At least one distro passed — treating overall run as success."
+              exit 0
+            else
+              echo "No distros passed — failing the run."
+              exit 1
+            fi

@@ -1,0 +1,12 @@
+name: Ubuntu 25.10
+
+on:
+  workflow_call: 
+  workflow_dispatch:
+
+jobs:
+  ubuntu-25-10:
+    uses: ./.github/workflows/reusable_distro_workflow.yml
+    with:
+      distro: "docker.io/library/ubuntu:25.10"
+      package_man: "apt"

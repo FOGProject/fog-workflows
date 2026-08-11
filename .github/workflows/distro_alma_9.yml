@@ -1,0 +1,12 @@
+name: AlmaLinux 9
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  almalinux-9:
+    uses: ./.github/workflows/reusable_distro_workflow.yml
+    with:
+      distro: "docker.io/library/almalinux:9"
+      package_man: "dnf"

@@ -1,0 +1,12 @@
+name: Debian 13
+
+on:
+  workflow_call: 
+  workflow_dispatch:
+
+jobs:
+  debian-13:
+    uses: ./.github/workflows/reusable_distro_workflow.yml
+    with:
+      distro: "docker.io/library/debian:13-slim"
+      package_man: "apt"

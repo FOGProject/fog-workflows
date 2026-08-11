@@ -87,10 +87,10 @@ jobs:
           client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
           private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
           owner: FOGProject
-          repositories: "fogproject-install-validation"
+          repositories: "fog-workflows"
 
       - name: Call main workflow that calls all the distros
-        run: gh workflow run --repo FOGProject/fogproject-install-validation run_all_distros.yml
+        run: gh workflow run run_all_distros.yml
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
@@ -108,14 +108,14 @@ jobs:
           client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
           private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
           owner: FOGProject
-          repositories: "fogproject-install-validation"
+          repositories: "fog-workflows"
 
       - name: Wait a minute for the runs to start
         run: sleep 60
 
       - name: Get run IDs
         run: |
-          run_id=$(gh run list --repo FOGProject/fogproject-install-validation --workflow run_all_distros.yml --json databaseId --limit 1 | jq -r '.[0].databaseId')
+          run_id=$(gh run list --workflow run_all_distros.yml --json databaseId --limit 1 | jq -r '.[0].databaseId')
           echo "RUN_ID=$run_id" >> $GITHUB_ENV
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
@@ -125,7 +125,7 @@ jobs:
           run_status=""
           while [[ $run_status != "success" && $run_status != "failure" ]]; do
             sleep 15
-            run_status=$(gh run view --repo FOGProject/fogproject-install-validation ${{ env.RUN_ID }} --exit-status --json conclusion | jq -r '.conclusion')
+            run_status=$(gh run view ${{ env.RUN_ID }} --exit-status --json conclusion | jq -r '.conclusion')
           done
 
           if [[ $run_status == "failure" ]]; then

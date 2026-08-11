@@ -1,0 +1,135 @@
+name: "Reusable Distro Workflow"
+
+on:
+  workflow_call:
+    inputs:
+      distro:
+        required: true
+        type: string
+      package_man:
+        required: true
+        type: string
+      additional_packages:
+        required: false
+        type: string
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  reusable-workflow:
+    runs-on: ubuntu-24.04
+    
+    steps:
+      - name: Ensure crun is new enough for distrobox
+        env: 
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          which crun || echo "crun not found on PATH yet"
+      
+          set +e
+          CURRENT=$(crun --version 2>/dev/null | head -1 | grep -oP '\d+\.\d+\.\d+')
+          set -e
+          echo "Current crun: ${CURRENT:-none found}"
+      
+          NEED_UPGRADE=1
+          if [ -n "$CURRENT" ] && dpkg --compare-versions "$CURRENT" ge "1.14.3"; then
+            NEED_UPGRADE=0
+          fi
+      
+          if [ "$NEED_UPGRADE" = "1" ]; then
+            # echo "apt version too old (or missing), attempting manual upgrade..."
+            # set +e
+            # sudo apt-get update -qq && sudo apt-get install -y crun
+            # APT_STATUS=$?
+            # set -e
+            # if [ $APT_STATUS -ne 0 ]; then
+            #   echo "apt-get update/install failed (exit $APT_STATUS) — likely a transient mirror issue, falling through to GitHub release download"
+            # fi
+
+            # NEW=$(crun --version 2>/dev/null | head -1 | grep -oP '\d+\.\d+\.\d+')
+            # if [ -z "$NEW" ] || ! dpkg --compare-versions "$NEW" ge "1.14.3"; then
+            echo "not a new enough crun, pulling latest release from GitHub..."
+    
+            RELEASE_JSON=$(curl -sSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              https://api.github.com/repos/containers/crun/releases/latest)
+    
+            # Detect rate-limiting / API failure before trying to parse anything from it
+            if echo "$RELEASE_JSON" | jq -e '.message' >/dev/null 2>&1; then
+              echo "GitHub API call failed: $(echo "$RELEASE_JSON" | jq -r '.message')"
+              echo "Falling back to pinned known-good crun release."
+              # Update this URL if the pinned version below ever goes stale/EOL:
+              DOWNLOAD_URL="https://github.com/containers/crun/releases/download/1.28/crun-1.28-linux-amd64"
+            else
+              DOWNLOAD_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name == "crun-'"$(echo "$RELEASE_JSON" | jq -r .tag_name)"'-linux-amd64") | .browser_download_url')
+              if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+                echo "Couldn't find a matching linux-amd64 asset in the release, falling back to pinned version."
+                DOWNLOAD_URL="https://github.com/containers/crun/releases/download/1.28/crun-1.28-linux-amd64"
+              fi
+            fi
+      
+            echo "Downloading crun from: $DOWNLOAD_URL"
+            curl -sSL -f -o /tmp/crun "$DOWNLOAD_URL"
+            chmod +x /tmp/crun
+    
+            # Sanity check the binary actually works before replacing the system one
+            if ! /tmp/crun --version >/dev/null 2>&1; then
+              echo "Downloaded crun binary is broken, aborting."
+              exit 1
+            fi
+    
+            sudo mv /tmp/crun "$(command -v crun)"
+            # fi
+          fi
+      
+          echo "Final crun binary location: $(which crun)"
+          echo "Final crun version: $(crun --version | head -1)"
+        
+      - name: Make container name
+        run: |
+          input_distro=${{ inputs.distro }}
+          distro_name_and_ver=$(echo $input_distro | awk -F '/' '{print $NF}')
+          container_name=${distro_name_and_ver/:/_}
+          echo "CONTAINER_NAME=$container_name" >> $GITHUB_ENV
+
+      - name: Check if additional package is needed by package manager
+        run: |
+          if [[ ${{ inputs.package_man }} == "apt" ]]; then
+            echo "ADDITIONAL_PKG=libpam-systemd" >> $GITHUB_ENV
+          else
+            echo "ADDITIONAL_PKG=" >> $GITHUB_ENV
+          fi
+
+      - name: Add additional packages if passed as an input
+        if: ${{ inputs.additional_packages }}
+        run: |
+          additional_packages_input=${{ inputs.additional_packages }}
+          echo "ADDITIONAL_PKG=$ADDITIONAL_PKG $additional_packages_input" >> $GITHUB_ENV
+      
+      - name: Update container
+        run: |
+          if [[ ${{ inputs.package_man }} == "apt" ]]; then
+            echo "UPDATE_COMMAND=apt update && apt upgrade -y" >> $GITHUB_ENV
+          else
+            echo "UPDATE_COMMAND=dnf update -y" >> $GITHUB_ENV
+          fi      
+
+      - name: Install Distrobox
+        run: curl -s https://raw.githubusercontent.com/89luca89/distrobox/main/install | sudo sh
+
+      - name: Create Distrobox
+        run: |
+          distrobox create --name $CONTAINER_NAME --image ${{ inputs.distro }} \
+            --additional-packages "git systemd ${{ inputs.package_man }} sudo $ADDITIONAL_PKG" \
+            --init-hooks "$UPDATE_COMMAND" \
+            --init --pull --root --unshare-all \
+            --absolutely-disable-root-password-i-am-really-positively-sure
+
+      - name: Clone FOG
+        run: distrobox enter --root $CONTAINER_NAME -- git clone -b dev-branch https://github.com/FOGProject/fogproject.git
+      
+      - name: Install FOG
+        run: distrobox enter --root $CONTAINER_NAME -- bash -c 'sudo ./fogproject/bin/installfog.sh -y'

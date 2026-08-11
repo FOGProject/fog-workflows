@@ -1,0 +1,13 @@
+name: Fedora 42
+
+on:
+  workflow_call:
+  workflow_dispatch:
+
+jobs:
+  fedora-42:
+    uses: ./.github/workflows/reusable_distro_workflow.yml
+    with:
+      distro: "quay.io/fedora/fedora-minimal:42"
+      package_man: "dnf"
+      additional_packages: "gawk"
