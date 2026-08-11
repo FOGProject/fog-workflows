@@ -7,19 +7,15 @@ defaults:
   run:
     shell: bash
 
-permissions: 
-  actions: write
-  contents: write
-
 jobs:
   get-all-distros-matrix:
     runs-on: ubuntu-24.04
     outputs:
       matrix: ${{ steps.set-matrix.outputs.matrix }}
-    
+
     steps:
       - name: Checkout code
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
       
       - name: Set matrix of distros
         id: set-matrix
@@ -43,13 +39,21 @@ jobs:
         ${{ fromJson(needs.get-all-distros-matrix.outputs.matrix) }}
 
     steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+          private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
+          owner: FOGProject
+          repositories: "fog-workflows"
+
       - name: Checkout code
-        uses: actions/checkout@v6
-      
+        uses: actions/checkout@v7
+
       - name: Run all distros
         run: gh workflow run ${{ matrix.distros }}
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
   
   check-if-successful:
       needs: [get-all-distros-matrix, run-distro]
@@ -60,6 +64,14 @@ jobs:
           ${{ fromJson(needs.get-all-distros-matrix.outputs.matrix) }}
 
       steps:
+        - uses: actions/create-github-app-token@v3
+          id: app-token
+          with:
+            client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+            private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
+            owner: FOGProject
+            repositories: "fog-workflows"
+
         - name: Wait a minute for the runs to start
           run: sleep 60
 
@@ -68,7 +80,7 @@ jobs:
             run_id=$(gh run list --repo ${{ github.repository }} --workflow ${{ matrix.distros }} --json databaseId --limit 1 | jq -r '.[0].databaseId')
             echo "RUN_ID=$run_id" >> $GITHUB_ENV
           env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
         - name: Check if distro workflow passed or failed
           id: check
@@ -84,7 +96,7 @@ jobs:
               exit 1
             fi
           env:
-            GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
 
         - name: Record result
           if: always()
@@ -99,7 +111,7 @@ jobs:
 
         - name: Upload result artifact
           if: always()
-          uses: actions/upload-artifact@v4
+          uses: actions/upload-artifact@v7
           with:
             name: distro-result-${{ strategy.job-index }}
             path: results/
@@ -110,7 +122,7 @@ jobs:
       runs-on: ubuntu-24.04
       steps:
         - name: Download all result artifacts
-          uses: actions/download-artifact@v4
+          uses: actions/download-artifact@v8
           with:
             pattern: distro-result-*
             path: all-results
