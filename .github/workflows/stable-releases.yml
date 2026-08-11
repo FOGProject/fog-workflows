@@ -31,21 +31,20 @@ jobs:
 
       - uses: actions/checkout@v7
         with:
-          token: ${{ steps.app-token.outputs.token }}
-          repository: FOGProject/fogproject
-          ref: dev-branch
           persist-credentials: false
 
       - name: Get version to be released and create PR with that in the name
         id: create_pr
-        run: | 
+        run: |
           echo 'Get version to be released and create PR with that in the name'
-          system_file="$(git rev-parse --show-toplevel)/packages/web/lib/fog/system.class.php"
-          tag=$(grep "define('FOG_VERSION'" $system_file | sed "s/.*FOG_VERSION', '\([^']*\)');/\1/")
+          # sync-and-check-dev-branch-before-release (above) already ran the version sync
+          # workflow for dev-branch, which always rewrites badges/dev-branch.json to the
+          # current FOG_VERSION whether or not it drifted - so this file is already fresh,
+          # no need to check out fogproject and grep system.class.php for it.
+          tag=$(jq -r '.message' badges/dev-branch.json)
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          prevTag=$(gh release view --json tagName --jq '.tagName')
+          prevTag=$(gh release view --repo FOGProject/fogproject --json tagName --jq '.tagName')
           echo "prevTag=$prevTag" >> "$GITHUB_OUTPUT"
-          # prevTag=$(gh release view --repo FOGProject/fogproject stable --json tagName --jq '.tagName')
           echo "Tag: $tag"
           echo "Previous Tag: $prevTag"
           if [[ "$tag" == "$prevTag" ]]; then
@@ -241,11 +240,18 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+    - name: Checkout fog-workflows (for version badges)
+      uses: actions/checkout@v7
+      with:
+          path: fog-workflows
+          persist-credentials: false
+
     - name: Initialize Release Environment Variables
       run: |
         echo "TAG=${{ needs.merge-after-all-tests-passed.outputs.release_tag }}" >> $GITHUB_ENV
         echo "PREV_TAG=${{ needs.merge-after-all-tests-passed.outputs.previous_tag }}" >> $GITHUB_ENV
         echo "NOTES_FILE=$RUNNER_TEMP/release_body.md" >> $GITHUB_ENV
+        echo "WORKING_1_6=$(jq -r '.message' fog-workflows/badges/working-1.6.json)" >> $GITHUB_ENV
 
     - name: Generate Base PR Notes
       env:
@@ -319,13 +325,20 @@ jobs:
             for ghsa_id in $ghsa_ids; do
               echo "Updating Security Advisory $ghsa_id with patched version >=$TAG..."
               current_vulns=$(gh api /repos/FOGProject/fogproject/security-advisories/"$ghsa_id" --jq '.vulnerabilities')
-              
-              updated_vulns=$(echo "$current_vulns" | jq --arg new_tag ">=$TAG" 'map(
-                if .patched_versions == "" or .patched_versions == null then
-                  .patched_versions = $new_tag
-                else
-                  .patched_versions += ", \($new_tag)"
-                end
+
+              # GitHub's PATCH validation requires package.ecosystem to be a real enum value.
+              # Manually-added advisory entries can come back from GET with ecosystem/name as
+              # "" (shown as "Other" in the UI) rather than the "other" enum value, which the
+              # PATCH then rejects with a 422 if echoed back unchanged.
+              #
+              # Also appends the current working-1.6 beta version (from badges/working-1.6.json)
+              # when patched_versions doesn't already mention a 1.6 line - historically these
+              # advisories affecting both branches got a manual 1.6.0-beta.NNNN entry too.
+              updated_vulns=$(echo "$current_vulns" | jq --arg new_tag ">=$TAG" --arg beta_tag ">=$WORKING_1_6" 'map(
+                .package.ecosystem = (if .package.ecosystem == "" or .package.ecosystem == null then "other" else .package.ecosystem end) |
+                .package.name = (if .package.name == "" or .package.name == null then "FOGProject" else .package.name end) |
+                (if .patched_versions == "" or .patched_versions == null then $new_tag else .patched_versions + ", " + $new_tag end) as $with_stable |
+                .patched_versions = (if ($with_stable | test("1\\.6")) then $with_stable else $with_stable + ", " + $beta_tag end)
               )')
               
               echo "{\"vulnerabilities\": $updated_vulns}" > "$RUNNER_TEMP/patch_payload.json"
