@@ -1,0 +1,331 @@
+name: Update Language Files, Fix PSR2, and Sync FOG Version
+
+# Daily sweep across all watched fogproject branches that keeps three
+# generated/derived things in sync: gettext translations, PSR2 formatting,
+# and FOG_VERSION/FOG_CHANNEL - all three as ONE job, one commit, one push
+# per branch, in that order, because the third depends on the first two
+# having already landed.
+#
+# WHY THESE THREE ARE ONE WORKFLOW
+#
+# FOG_VERSION on dev-branch/working-1.6/feature-*/rc-* branches is derived
+# from commit count since master (see .githooks/lib/fog-version.sh). A
+# translation or PSR2 fixup commit changes that count, so the version
+# check has to see it before computing a version, not race it. This used
+# to be two workflows on a 30-minute schedule offset (sync at 09:40,
+# version check at 10:10) trusting that the gap was enough. It's cleaner
+# and race-proof to do it in one job: regenerate/format first, then
+# compute the version - using fog-version.sh's own "local" flag (the same
+# flag .githooks/pre-commit passes when it's mid-commit) to tell it a new
+# commit for the regen changes is about to exist, so the version already
+# accounts for it instead of catching up the next day.
+#
+# Regenerating translations and reformatting centrally also backstops the
+# gap fogproject's own .githooks/lib/require-tools.sh documents: a hook
+# cannot install anything on a machine it does not control, so
+# .githooks/pre-commit's psrfix()/updateLanguage() skip loudly (a warning
+# to stderr, commit proceeds anyway) rather than silently or refusing
+# outright when php-cs-fixer/gettext aren't installed. This sweep is the
+# "CI regenerates it centrally" half of that design, so the tooling stays
+# advisory for contributors regardless of what they had installed.
+# php-cs-fixer is pinned below (not "latest") because two installed
+# versions can disagree about the same file, which would otherwise make
+# this job fight itself.
+#
+# Calls fogproject's own .githooks/lib/update-language.sh for the
+# translation regen - the same script .githooks/pre-commit calls locally -
+# rather than keeping a second, separately-maintained copy of that logic
+# here, for the same reason fog-version.sh/apply-fog-version.sh aren't
+# reimplemented either. That script (and require-tools.sh) already exist on
+# dev-branch and working-1.6; an rc-*/feature-* branch cut before they
+# landed there won't have update-language.sh yet, so the regen step below
+# skips it (loudly, via ::warning::) rather than failing the whole job on a
+# branch nobody can fix without rebasing.
+#
+# WHY IT IS A SCHEDULE AND NOT A PUSH TRIGGER
+#
+# A push-triggered stub living in fogproject and calling a reusable
+# workflow here means the bot's own fixup push re-triggers the stub, which
+# re-triggers this workflow, which pushes another fixup. That exact loop
+# put 30 commits on dev-branch in ~20 minutes before it was caught. A cron
+# tick cannot look at what was last pushed, so it cannot feed itself.
+#
+# Never touches `stable` - the branch filter below excludes it, because
+# that branch's version and contents are owned by stable-releases.yml.
+#
+# Runs at 10:10 UTC, just over an hour before stable-releases.yml's
+# monthly run (11:11 UTC on the 11th), so a release never reads a stale
+# version - or stale translations/formatting - on the day it's cut.
+# stable-releases.yml also calls this directly (for dev-branch) before
+# opening the release PR, so release day doesn't have to wait for the
+# daily schedule either.
+
+on:
+  schedule:
+    - cron: "10 10 * * *"
+  workflow_call:
+    inputs:
+      branch:
+        description: "Single fogproject branch to sync (omit to sweep all watched branches)"
+        required: false
+        type: string
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "Single fogproject branch to sync (omit to sweep all watched branches)"
+        required: false
+        type: string
+
+concurrency:
+  group: fog-generated-sync-and-version
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+env:
+  # Pinned, not "latest". An unpinned formatter is a second source of drift:
+  # 3.x and 4.x disagree about the same file, so an unpinned CI run would
+  # reformat whatever the previous run wrote. Bump this deliberately, and
+  # expect one large commit when you do.
+  PHP_CS_FIXER_VERSION: "3.62.0"
+
+jobs:
+  discover-branches:
+    runs-on: ubuntu-24.04
+    outputs:
+      branches: ${{ steps.list.outputs.branches }}
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+          private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
+          owner: FOGProject
+          repositories: "fogproject"
+
+      - name: List watched branches
+        id: list
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          SINGLE_BRANCH: ${{ inputs.branch }}
+        run: |
+          set -e
+          if [ -n "$SINGLE_BRANCH" ]; then
+            branches=$(jq -n --arg branch "$SINGLE_BRANCH" -c '[$branch]')
+          else
+            all=$(gh api repos/FOGProject/fogproject/branches --paginate --jq '.[].name')
+            matched=$(printf '%s\n' "$all" | grep -E '^(working-1\.6|dev-branch)$|^(rc-|feature-)' || true)
+            branches=$(printf '%s\n' "$matched" | jq -R -s -c 'split("\n") | map(select(length > 0))')
+          fi
+          echo "branches=$branches" >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## Watched branches"
+            echo ""
+            if [ "$branches" = "[]" ]; then
+              echo "None found."
+            else
+              printf '%s\n' "$branches" | jq -r '.[] | "- `\(.)`"'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  sync-branch:
+    needs: discover-branches
+    if: needs.discover-branches.outputs.branches != '[]'
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        branch: ${{ fromJson(needs.discover-branches.outputs.branches) }}
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+          private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
+          owner: FOGProject
+          repositories: "fogproject"
+
+      - uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          repository: FOGProject/fogproject
+          ref: ${{ matrix.branch }}
+          # Full history and tags: needed for the version compute step
+          # below (commit count since master, `git describe --tags`).
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Install tooling
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gettext php-cli
+          curl -sSL -o /usr/local/bin/php-cs-fixer \
+            "https://github.com/PHP-CS-Fixer/PHP-CS-Fixer/releases/download/v${PHP_CS_FIXER_VERSION}/php-cs-fixer.phar"
+          chmod +x /usr/local/bin/php-cs-fixer
+          php-cs-fixer --version
+
+      - name: Regenerate translation template
+        id: lang
+        run: |
+          set -e
+          # dev-branch and working-1.6 already carry this script; any new
+          # feature-*/rc-* branch cut from either afterward will too.
+          # Branches cut before that (e.g. feature-198-unique-host-identifier,
+          # feature-fog2-gui) won't - loudly skip rather than failing the
+          # whole job, but as a visible warning, not a silent notice.
+          if [ ! -f .githooks/lib/update-language.sh ]; then
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::.githooks/lib/update-language.sh is not on ${{ matrix.branch }} (branch predates it); skipping translation regeneration."
+            exit 0
+          fi
+          echo "skipped=false" >> "$GITHUB_OUTPUT"
+          sh .githooks/lib/update-language.sh "$PWD"
+
+      - name: Apply PSR2 formatting
+        env:
+          # The phar refuses to run as a non-interactive "risky" job otherwise.
+          PHP_CS_FIXER_IGNORE_ENV: "1"
+        run: |
+          set -e
+          # Whole tree, deliberately. The hook fixes only the files staged for
+          # a given commit, which is right locally but leaves anything a
+          # tool-less machine committed untouched. This is the sweep that
+          # catches those.
+          #
+          # No `|| true`: in fix mode (as opposed to --dry-run) the fixer
+          # exits 0 whether or not it changed anything, so a non-zero here is
+          # a real failure - a parse error or a missing extension - and
+          # swallowing it would mean committing a half-formatted tree and
+          # reporting success.
+          php-cs-fixer fix packages/web --rules=@PSR2 --quiet
+
+      - name: Stage generated file changes
+        id: regen
+        run: |
+          set -e
+          git add -A
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git diff --cached --stat
+          fi
+
+      - name: Compute FOG_VERSION / FOG_CHANNEL
+        id: compute
+        run: |
+          set -e
+          # local=1 when the regen step above just staged a real change:
+          # that's about to become a real commit, so fog-version.sh needs
+          # to count it even though it isn't committed yet - the same
+          # "mid-commit" flag .githooks/pre-commit passes for the same
+          # reason. local=0 (today's plain drift check) when there's
+          # nothing pending.
+          local_flag=0
+          [ "${{ steps.regen.outputs.changed }}" = "true" ] && local_flag=1
+          computed=$(sh .githooks/lib/fog-version.sh "${{ matrix.branch }}" "$local_flag")
+          echo "version=$(printf '%s\n' "$computed" | sed -n '1p')" >> "$GITHUB_OUTPUT"
+          echo "channel=$(printf '%s\n' "$computed" | sed -n '2p')" >> "$GITHUB_OUTPUT"
+          echo "drifted=$(printf '%s\n' "$computed" | sed -n '3p')" >> "$GITHUB_OUTPUT"
+
+      - name: Apply version fix
+        id: version
+        if: steps.compute.outputs.drifted == 'true'
+        run: |
+          set -e
+          system_file="packages/web/lib/fog/system.class.php"
+          old_version=$(grep "define('FOG_VERSION'" "$system_file" | sed "s/.*FOG_VERSION', '\([^']*\)');/\1/")
+          echo "old_version=$old_version" >> "$GITHUB_OUTPUT"
+
+          sh .githooks/lib/apply-fog-version.sh \
+            "${{ steps.compute.outputs.version }}" \
+            "${{ steps.compute.outputs.channel }}"
+
+          git add "$system_file"
+
+      - name: Commit and push if stale
+        id: commit
+        env:
+          BOT_SLUG: ${{ steps.app-token.outputs.app-slug }}
+        run: |
+          set -e
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing to do on ${{ matrix.branch }}."
+            exit 0
+          fi
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+          version_changed=false
+          if [ -n "${{ steps.version.outputs.old_version }}" ] && \
+             [ "${{ steps.version.outputs.old_version }}" != "${{ steps.compute.outputs.version }}" ]; then
+            version_changed=true
+          fi
+
+          if [ "${{ steps.regen.outputs.changed }}" = "true" ] && [ "$version_changed" = "true" ]; then
+            message="Generated Files & Version Sync: regenerate translations/PSR2 formatting and bump version from ${{ steps.version.outputs.old_version }} to ${{ steps.compute.outputs.version }} (${{ steps.compute.outputs.channel }}) on ${{ matrix.branch }}"
+          elif [ "$version_changed" = "true" ]; then
+            message="Version Sync: Increment version from ${{ steps.version.outputs.old_version }} to ${{ steps.compute.outputs.version }} for ${{ steps.compute.outputs.channel }} channel on ${{ matrix.branch }} to match commit count since master"
+          else
+            message="Generated Files Sync: regenerate translations and PSR2 formatting on ${{ matrix.branch }}"
+          fi
+
+          git config user.name "${BOT_SLUG}[bot]"
+          git config user.email "${BOT_SLUG}[bot]@users.noreply.github.com"
+          git commit -m "$message"
+          git push origin "HEAD:${{ matrix.branch }}"
+
+      - name: Update version badge
+        if: contains(fromJson('["dev-branch", "working-1.6"]'), matrix.branch)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          path="badges/${{ matrix.branch }}.json"
+          body=$(jq -n \
+            --arg label "${{ matrix.branch }}" \
+            --arg message "${{ steps.compute.outputs.version }}" \
+            '{schemaVersion: 1, label: $label, message: $message, color: "blue", cacheSeconds: 3600}')
+          content=$(printf '%s' "$body" | base64 -w0)
+
+          sha=$(gh api "repos/FOGProject/fog-workflows/contents/$path" --jq .sha 2>/dev/null || true)
+          if [ -n "$sha" ]; then
+            gh api "repos/FOGProject/fog-workflows/contents/$path" -X PUT \
+              -f message="chore: update ${{ matrix.branch }} version badge" \
+              -f content="$content" -f sha="$sha" >/dev/null
+          else
+            gh api "repos/FOGProject/fog-workflows/contents/$path" -X PUT \
+              -f message="chore: add ${{ matrix.branch }} version badge" \
+              -f content="$content" >/dev/null
+          fi
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "## \`${{ matrix.branch }}\`"
+            echo ""
+            if [ "${{ steps.regen.outputs.changed }}" = "true" ]; then
+              echo "🔧 **Generated files regenerated** - translations and/or PSR2 formatting were stale."
+            else
+              echo "✅ Generated files already current."
+            fi
+            if [ "${{ steps.compute.outputs.drifted }}" != "true" ]; then
+              echo "✅ Version already correct - \`${{ steps.compute.outputs.version }}\` (channel: ${{ steps.compute.outputs.channel }})"
+            elif [ "${{ steps.version.outcome }}" = "success" ]; then
+              echo "🔧 **Version fixed** - \`${{ steps.version.outputs.old_version }}\` → \`${{ steps.compute.outputs.version }}\` (channel: ${{ steps.compute.outputs.channel }})"
+            else
+              echo "⚠️ Version drift detected but the fix did not complete - check the job log."
+            fi
+            if [ "${{ steps.commit.outcome }}" != "success" ]; then
+              echo ""
+              echo "⚠️ The commit/push step did not complete - check the job log."
+            fi
+            if [ "${{ steps.lang.outputs.skipped }}" = "true" ]; then
+              echo ""
+              echo "ℹ️ Translation regeneration was skipped - this branch predates \`.githooks/lib/update-language.sh\`. PSR2 formatting and version sync still ran."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
