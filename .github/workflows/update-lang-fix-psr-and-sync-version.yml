@@ -167,6 +167,36 @@ jobs:
           chmod +x /usr/local/bin/php-cs-fixer
           php-cs-fixer --version
 
+      - name: Fetch the plugin tree
+        run: |
+          set -e
+          # Since fogproject#1029 the bundled plugins are a pinned fog-plugins
+          # release rather than a tree in the repository, and the regeneration
+          # below feeds xgettext from a filesystem walk of packages/web. Without
+          # this step the sweep builds a catalogue with every plugin string
+          # missing -- 528 msgids when it was first measured, the whole of LDAP,
+          # Windows Key and WOL Broadcast among them -- and pushes it.
+          #
+          # update-language.sh refuses outright when the tree is absent, so the
+          # symptom today would be a red job rather than a silent truncation.
+          # This is what makes the job pass for the right reason.
+          #
+          # Conditional: dev-branch, and any branch cut before #1029, still
+          # carry the plugins in-tree and ship no fetcher. Those are already
+          # correct and must be left alone.
+          if [ ! -x bin/fetch-plugins.sh ]; then
+            echo "No bin/fetch-plugins.sh on ${{ matrix.branch }}; plugins are in-tree there."
+            exit 0
+          fi
+          bin/fetch-plugins.sh
+          # Belt and braces. The fetch verifies its own checksum and fails
+          # loudly, but a catalogue is about to be built from this directory and
+          # a silently empty one is the failure being designed out.
+          if [ -z "$(ls -A packages/web/lib/plugins 2>/dev/null)" ]; then
+            echo "::error::packages/web/lib/plugins is empty after fetching on ${{ matrix.branch }}."
+            exit 1
+          fi
+
       - name: Regenerate translation template
         id: lang
         run: |
