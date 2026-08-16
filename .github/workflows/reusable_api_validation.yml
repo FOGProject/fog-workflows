@@ -1,0 +1,430 @@
+name: "Reusable API Validation"
+
+# Stands up a throwaway FOG server and exercises its REST API.
+#
+# The distro workflows next door prove installfog.sh exits 0, which is a real
+# check -- the installer probes its own web tier and verifies the schema
+# deploy before returning. What none of them do is call the API afterwards, so
+# the surface clients actually use has never been tested.
+#
+# The container is created exactly the way reusable_distro_workflow.yml
+# creates it, crun bootstrap and all, because that recipe is load-bearing and
+# distrobox fails silently without it. Everything after the install is new.
+#
+# Runs against an arbitrary repo and ref rather than a hardcoded dev-branch,
+# so it can validate a pull request before it merges.
+#
+# The container keeps its own network namespace (--unshare-all) but podman
+# gives it a routable address the runner can reach -- confirmed at 10.88.0.2
+# on the first run. So the seeding happens inside the container, where the
+# database is, and every test runs on the runner against that address. That
+# keeps the test side in ordinary curl and pwsh rather than smuggling scripts
+# through distrobox, and it is why the optional FogApi suite below needs
+# nothing installed in the container at all.
+#
+# Note on tokens, because it is the easy thing to get wrong: globalSettings
+# holds the API token RAW. The web UI shows base64_encode() of it and
+# Route::_testToken() base64_decodes whatever arrives in the header. So a
+# client copying from the UI sends the value verbatim, but anything reading
+# the database -- this workflow -- has to encode it first.
+
+on:
+  workflow_call:
+    inputs:
+      repo:
+        description: "owner/name of the FOG repo to install"
+        required: false
+        default: "FOGProject/fogproject"
+        type: string
+      ref:
+        description: "branch or tag to install"
+        required: false
+        default: "working-1.6"
+        type: string
+      distro:
+        required: false
+        default: "docker.io/library/ubuntu:24.04"
+        type: string
+      package_man:
+        required: false
+        default: "apt"
+        type: string
+      additional_packages:
+        required: false
+        type: string
+      expect_openapi:
+        description: "require the OpenAPI endpoints; off for refs that predate them"
+        required: false
+        default: false
+        type: boolean
+      fogapi_ref:
+        description: "FogApi branch to run the real-server suite from; empty to skip"
+        required: false
+        default: ""
+        type: string
+      fogapi_repo:
+        required: false
+        default: "darksidemilk/FogApi"
+        type: string
+  workflow_dispatch:
+    inputs:
+      repo:
+        description: "owner/name of the FOG repo to install"
+        required: false
+        default: "FOGProject/fogproject"
+        type: string
+      ref:
+        description: "branch or tag to install"
+        required: false
+        default: "working-1.6"
+        type: string
+      distro:
+        required: false
+        default: "docker.io/library/ubuntu:24.04"
+        type: string
+      package_man:
+        required: false
+        default: "apt"
+        type: string
+      additional_packages:
+        required: false
+        type: string
+      expect_openapi:
+        description: "require the OpenAPI endpoints; off for refs that predate them"
+        required: false
+        default: false
+        type: boolean
+      fogapi_ref:
+        description: "FogApi branch to run the real-server suite from; empty to skip"
+        required: false
+        default: ""
+        type: string
+      fogapi_repo:
+        required: false
+        default: "darksidemilk/FogApi"
+        type: string
+  # Self-test: a change to this file proves itself before it is merged, since
+  # workflow_dispatch only becomes available once it reaches main.
+  pull_request:
+    paths:
+      - '.github/workflows/reusable_api_validation.yml'
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  api-validation:
+    runs-on: ubuntu-24.04
+    # The first green run installed in under five minutes. Sixty is headroom
+    # for a slow mirror, and stops a hung install sitting on the 360 default.
+    timeout-minutes: 60
+
+    steps:
+      - name: Resolve inputs
+        # inputs is null on pull_request, so every value needs a fallback.
+        run: |
+          echo "FOG_REPO=${{ inputs.repo || 'FOGProject/fogproject' }}" >> $GITHUB_ENV
+          echo "FOG_REF=${{ inputs.ref || 'working-1.6' }}" >> $GITHUB_ENV
+          echo "FOG_DISTRO=${{ inputs.distro || 'docker.io/library/ubuntu:24.04' }}" >> $GITHUB_ENV
+          echo "FOG_PKGMAN=${{ inputs.package_man || 'apt' }}" >> $GITHUB_ENV
+          echo "FOGAPI_REPO=${{ inputs.fogapi_repo || 'darksidemilk/FogApi' }}" >> $GITHUB_ENV
+          echo "FOGAPI_REF=${{ inputs.fogapi_ref || '' }}" >> $GITHUB_ENV
+          echo "EXPECT_OPENAPI=${{ inputs.expect_openapi || 'false' }}" >> $GITHUB_ENV
+
+      - name: Ensure crun is new enough for distrobox
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          which crun || echo "crun not found on PATH yet"
+
+          set +e
+          CURRENT=$(crun --version 2>/dev/null | head -1 | grep -oP '\d+\.\d+\.\d+')
+          set -e
+          echo "Current crun: ${CURRENT:-none found}"
+
+          NEED_UPGRADE=1
+          if [ -n "$CURRENT" ] && dpkg --compare-versions "$CURRENT" ge "1.14.3"; then
+            NEED_UPGRADE=0
+          fi
+
+          if [ "$NEED_UPGRADE" = "1" ]; then
+            echo "not a new enough crun, pulling latest release from GitHub..."
+
+            RELEASE_JSON=$(curl -sSL \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              https://api.github.com/repos/containers/crun/releases/latest)
+
+            if echo "$RELEASE_JSON" | jq -e '.message' >/dev/null 2>&1; then
+              echo "GitHub API call failed: $(echo "$RELEASE_JSON" | jq -r '.message')"
+              echo "Falling back to pinned known-good crun release."
+              DOWNLOAD_URL="https://github.com/containers/crun/releases/download/1.28/crun-1.28-linux-amd64"
+            else
+              DOWNLOAD_URL=$(echo "$RELEASE_JSON" | jq -r '.assets[] | select(.name == "crun-'"$(echo "$RELEASE_JSON" | jq -r .tag_name)"'-linux-amd64") | .browser_download_url')
+              if [ -z "$DOWNLOAD_URL" ] || [ "$DOWNLOAD_URL" = "null" ]; then
+                echo "Couldn't find a matching linux-amd64 asset in the release, falling back to pinned version."
+                DOWNLOAD_URL="https://github.com/containers/crun/releases/download/1.28/crun-1.28-linux-amd64"
+              fi
+            fi
+
+            echo "Downloading crun from: $DOWNLOAD_URL"
+            curl -sSL -f -o /tmp/crun "$DOWNLOAD_URL"
+            chmod +x /tmp/crun
+
+            if ! /tmp/crun --version >/dev/null 2>&1; then
+              echo "Downloaded crun binary is broken, aborting."
+              exit 1
+            fi
+
+            sudo mv /tmp/crun "$(command -v crun)"
+          fi
+
+          echo "Final crun binary location: $(which crun)"
+          echo "Final crun version: $(crun --version | head -1)"
+
+      - name: Make container name
+        run: |
+          distro_name_and_ver=$(echo "$FOG_DISTRO" | awk -F '/' '{print $NF}')
+          container_name=${distro_name_and_ver/:/_}
+          echo "CONTAINER_NAME=$container_name" >> $GITHUB_ENV
+
+      - name: Work out extra packages
+        run: |
+          if [[ "$FOG_PKGMAN" == "apt" ]]; then
+            echo "ADDITIONAL_PKG=libpam-systemd" >> $GITHUB_ENV
+            echo "UPDATE_COMMAND=apt update && apt upgrade -y" >> $GITHUB_ENV
+          else
+            echo "ADDITIONAL_PKG=" >> $GITHUB_ENV
+            echo "UPDATE_COMMAND=dnf update -y" >> $GITHUB_ENV
+          fi
+
+      - name: Add additional packages if passed as an input
+        if: ${{ inputs.additional_packages }}
+        run: echo "ADDITIONAL_PKG=$ADDITIONAL_PKG ${{ inputs.additional_packages }}" >> $GITHUB_ENV
+
+      - name: Install Distrobox
+        run: curl -s https://raw.githubusercontent.com/89luca89/distrobox/main/install | sudo sh
+
+      - name: Create Distrobox
+        run: |
+          distrobox create --name $CONTAINER_NAME --image "$FOG_DISTRO" \
+            --additional-packages "git systemd $FOG_PKGMAN sudo $ADDITIONAL_PKG" \
+            --init-hooks "$UPDATE_COMMAND" \
+            --init --pull --root --unshare-all \
+            --absolutely-disable-root-password-i-am-really-positively-sure
+
+      - name: Clone FOG
+        run: |
+          echo "Installing $FOG_REPO @ $FOG_REF"
+          distrobox enter --root $CONTAINER_NAME -- \
+            git clone -b "$FOG_REF" "https://github.com/${FOG_REPO}.git" fogproject
+
+      - name: Install FOG
+        run: distrobox enter --root $CONTAINER_NAME -- bash -c 'sudo ./fogproject/bin/installfog.sh -y'
+
+      - name: Seed API credentials
+        # The script is piped in rather than written to a file: distrobox
+        # shares the host /tmp, so a file staged on the runner collides with
+        # the container's view of the same path and the first attempt died on
+        # "Permission denied". Nothing is written anywhere; the values come
+        # back on stdout behind a marker and are masked before use.
+        run: |
+          read -r -d '' SEED <<'SEEDEOF' || true
+          set -euo pipefail
+          . /opt/fog/.fogsettings
+
+          MYSQLDB="${mysqldbname:-fog}"
+          MYSQLUSER="${snmysqluser:-fogmaster}"
+          HOSTOPT=""
+          if [ -n "${snmysqlhost:-}" ] && [ "${snmysqlhost}" != "localhost" ] && [ "${snmysqlhost}" != "127.0.0.1" ]; then
+            HOSTOPT="--host=${snmysqlhost}"
+          fi
+          myq() { mysql $HOSTOPT -s -N --user="$MYSQLUSER" --password="${snmysqlpass}" "$MYSQLDB" -e "$1"; }
+
+          # 1.6 seeds this on, dev-branch seeds it off. Upsert so either works.
+          myq "INSERT INTO globalSettings (settingKey,settingDesc,settingValue,settingCategory)
+               VALUES ('FOG_API_ENABLED','Enables API Access','1','API System')
+               ON DUPLICATE KEY UPDATE settingValue='1';"
+
+          # users.uAPIToken is never seeded by the schema, so the fog user has
+          # no personal token until the UI generates one. Write one directly.
+          USERTOKEN=$(head -c 48 /dev/urandom | od -An -tx1 | tr -d ' \n')
+          myq "UPDATE users SET uAPIToken='${USERTOKEN}', uAllowAPI='1' WHERE uName='fog';"
+
+          APITOKEN=$(myq "SELECT settingValue FROM globalSettings WHERE settingKey='FOG_API_TOKEN';")
+
+          # The header carries base64 of the raw value; the UI shows the same
+          # encoding, which is why a UI-copied token is sent verbatim.
+          b64() { printf %s "$1" | openssl base64 -A; }
+
+          echo "FOGENV FOG_API_TOKEN_B64=$(b64 "$APITOKEN")"
+          echo "FOGENV FOG_USER_TOKEN_B64=$(b64 "$USERTOKEN")"
+          echo "FOGENV FOG_WEBROOT=${webroot:-/fog/}"
+          echo "FOGENV FOG_HTTPPROTO=${httpproto:-https}"
+          SEEDEOF
+          B64=$(printf %s "$SEED" | base64 -w0)
+          OUT=$(distrobox enter --root "$CONTAINER_NAME" -- \
+            sudo bash -c "echo $B64 | base64 -d | bash")
+          echo "$OUT" | grep -v '^FOGENV ' || true
+          echo "$OUT" | grep '^FOGENV ' | sed 's/^FOGENV //' | while IFS= read -r line; do
+            echo "::add-mask::${line#*=}"
+          done
+          echo "$OUT" | grep '^FOGENV ' | sed 's/^FOGENV //' >> $GITHUB_ENV
+          echo "seeded $(echo "$OUT" | grep -c '^FOGENV ') values"
+
+      - name: Find the server address
+        # podman gives the container a routable address even with its own
+        # netns, so everything below runs on the runner rather than inside.
+        run: |
+          IP=$(sudo podman inspect "$CONTAINER_NAME" \
+            --format '{{range .NetworkSettings.Networks}}{{.IPAddress}}{{end}}')
+          if [ -z "$IP" ]; then
+            echo "could not determine the container address"; exit 1
+          fi
+          echo "FOG_IP=$IP" >> $GITHUB_ENV
+          echo "FOG_BASE_URL=${FOG_HTTPPROTO}://${IP}${FOG_WEBROOT}" >> $GITHUB_ENV
+          echo "server at ${FOG_HTTPPROTO}://${IP}${FOG_WEBROOT}"
+
+      - name: Validate the API
+        run: |
+          PASS=0; FAIL=0
+          ok(){ PASS=$((PASS+1)); echo "  PASS  $1"; }
+          no(){ FAIL=$((FAIL+1)); echo "  FAIL  $1"; }
+          # -k because the installer's cert is self-signed.
+          get(){ curl -sk --max-time 30 -w '\n%{http_code}' "$@"; }
+          AUTH=(-H "fog-api-token: ${FOG_API_TOKEN_B64}" -H "fog-user-token: ${FOG_USER_TOKEN_B64}")
+
+          echo "=== unauthenticated ==="
+          CODE=$(get "${FOG_BASE_URL}system/info" | tail -1)
+          [ "$CODE" = "200" ] && ok "system/info 200" || no "system/info returned $CODE"
+
+          echo "=== token auth ==="
+          CODE=$(get "${AUTH[@]}" "${FOG_BASE_URL}host" | tail -1)
+          [ "$CODE" = "200" ] && ok "host list 200 with tokens" || no "host list returned $CODE"
+
+          CODE=$(get "${FOG_BASE_URL}host" | tail -1)
+          [ "$CODE" = "403" ] && ok "host list refused without tokens" \
+            || no "host list without tokens returned $CODE, expected 403"
+
+          echo "=== openapi document ==="
+          # These endpoints only exist on refs that carry the generator. On
+          # anything older the router never allowlists the path, so it asks
+          # for tokens and answers 403 rather than 404 -- which reads like a
+          # permissions bug if you are not expecting it. Absent is only a
+          # failure when the caller said to expect them.
+          soft(){ if [ "$EXPECT_OPENAPI" = "true" ]; then no "$1"; else echo "  ----  $1 (not required for this ref)"; fi; }
+          GOT_DOC=0
+          for PATHPART in system/openapi swagger.json; do
+            RESP=$(get "${FOG_BASE_URL}${PATHPART}")
+            CODE=$(echo "$RESP" | tail -1)
+            DOC=$(echo "$RESP" | sed '$d')
+            if [ "$CODE" != "200" ]; then
+              soft "${PATHPART} returned $CODE"
+              continue
+            fi
+            ok "${PATHPART} 200"
+            GOT_DOC=$((GOT_DOC+1))
+            if ! echo "$DOC" | jq -e . >/dev/null 2>&1; then
+              no "${PATHPART} is not valid json"; continue
+            fi
+            ok "${PATHPART} is valid json"
+            V=$(echo "$DOC" | jq -r '.openapi // empty')
+            [ -n "$V" ] && ok "${PATHPART} declares openapi $V" || no "${PATHPART} has no openapi version"
+            NP=$(echo "$DOC" | jq '.paths | length')
+            NS=$(echo "$DOC" | jq '.components.schemas | length')
+            echo "      ${NP} paths, ${NS} schemas"
+            # A document that resolved almost no model classes still returns
+            # 200 and still parses. Near-empty is the realistic failure, not
+            # malformed, so the floor is what actually proves the generator
+            # walked the class list on a running server.
+            [ "$NP" -gt 300 ] && ok "${PATHPART} has $NP paths (>300)"               || no "${PATHPART} only has $NP paths - model classes likely failed to resolve"
+            [ "$NS" -gt 40 ] && ok "${PATHPART} has $NS schemas (>40)"               || no "${PATHPART} only has $NS schemas"
+          done
+
+          # Only meaningful when both actually returned a document. Comparing
+          # two identical 403 bodies passed, which is worse than not checking.
+          if [ "$GOT_DOC" -eq 2 ]; then
+            A=$(get "${FOG_BASE_URL}system/openapi" | sed '$d' | jq -S . 2>/dev/null | md5sum)
+            B=$(get "${FOG_BASE_URL}swagger.json"   | sed '$d' | jq -S . 2>/dev/null | md5sum)
+            [ "$A" = "$B" ] && ok "both paths serve the same document"               || no "system/openapi and swagger.json differ"
+          fi
+
+          echo ""
+          echo "PASSED: $PASS   FAILED: $FAIL"
+          [ "$FAIL" -eq 0 ]
+
+      - name: Trust the server certificate
+        # Only needed for the pwsh suite below. curl uses -k, but FogApi calls
+        # Invoke-RestMethod with no certificate override, so the installer's
+        # self-signed CA has to be trusted for real rather than bypassed.
+        if: ${{ env.FOGAPI_REF != '' }}
+        run: |
+          for CANDIDATE in \
+            /opt/fog/snapins/ssl/CA/.fogCA.pem \
+            /opt/fog/snapins/CA/.fogCA.pem ; do
+            if distrobox enter --root "$CONTAINER_NAME" -- sudo test -f "$CANDIDATE"; then
+              distrobox enter --root "$CONTAINER_NAME" -- sudo cat "$CANDIDATE" > /tmp/fogca.crt
+              break
+            fi
+          done
+          if [ ! -s /tmp/fogca.crt ]; then
+            echo "could not find the FOG CA; the pwsh suite will likely fail TLS"; exit 0
+          fi
+          sudo cp /tmp/fogca.crt /usr/local/share/ca-certificates/fogca.crt
+          sudo update-ca-certificates
+          echo "trusted the FOG CA"
+
+      - name: Run the FogApi real-server suite
+        # Opt-in. GitHub's ubuntu images ship PowerShell, and the container is
+        # reachable from the runner, so this needs nothing installed in the
+        # container -- the module runs here and talks to the server there.
+        if: ${{ env.FOGAPI_REF != '' }}
+        shell: pwsh
+        run: |
+          Write-Host "FogApi $env:FOGAPI_REPO @ $env:FOGAPI_REF against $env:FOG_BASE_URL"
+          git clone -b $env:FOGAPI_REF "https://github.com/$($env:FOGAPI_REPO).git" fogapi
+          Set-Location fogapi
+
+          # Write the settings file the module expects rather than driving
+          # Set-FogServerSettings, which refuses non-interactively when a
+          # value still looks like the placeholder text.
+          $settingsDir = Join-Path $HOME '.FogApi'
+          New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
+          @{
+              fogApiToken  = $env:FOG_API_TOKEN_B64
+              fogUserToken = $env:FOG_USER_TOKEN_B64
+              fogServer    = "$($env:FOG_HTTPPROTO)://$($env:FOG_IP)"
+          } | ConvertTo-Json | Set-Content -Path (Join-Path $settingsDir 'api-settings.json')
+
+          Import-Module ./FogApi/FogApi.psd1 -Force
+          Write-Host "version reported by the server: $(Get-FogVersion -ErrorAction Continue)"
+          ./Invoke-FogApiTests.ps1 -RealServer -CI
+
+      - name: Collect logs
+        if: always()
+        run: |
+          mkdir -p logs
+          # Copy by explicit name. Globbing the container path produced a
+          # literal '*' in a filename, which upload-artifact rejects.
+          distrobox enter --root "$CONTAINER_NAME" -- \
+            sudo bash -c 'cat /var/log/foginstall.log 2>/dev/null' > logs/foginstall.log || true
+          distrobox enter --root "$CONTAINER_NAME" -- \
+            sudo bash -c 'cat /home/fogproject/error_logs/fog_error_*.log 2>/dev/null' \
+            > logs/fog_error.log || true
+          distrobox enter --root "$CONTAINER_NAME" -- \
+            sudo bash -c 'cat /opt/fog/.fogsettings 2>/dev/null' \
+            | grep -v -i 'pass' > logs/fogsettings-redacted.txt || true
+          # Keep the generated document itself; it is the artifact worth reading.
+          curl -sk --max-time 30 "${FOG_BASE_URL}system/openapi" \
+            | jq . > logs/openapi.json 2>/dev/null || true
+          find logs -type f -size -1c -delete || true
+          ls -la logs/ || true
+
+      - name: Upload logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-validation-${{ env.CONTAINER_NAME }}
+          path: logs/
+          if-no-files-found: warn
