@@ -125,12 +125,12 @@ jobs:
         # inputs is null on pull_request, so every value needs a fallback.
         run: |
           echo "FOG_REPO=${{ inputs.repo || 'FOGProject/fogproject' }}" >> $GITHUB_ENV
-          echo "FOG_REF=${{ inputs.ref || 'working-1.6' }}" >> $GITHUB_ENV
+          echo "FOG_REF=${{ inputs.ref || 'api-paging-limits' }}" >> $GITHUB_ENV
           echo "FOG_DISTRO=${{ inputs.distro || 'docker.io/library/ubuntu:24.04' }}" >> $GITHUB_ENV
           echo "FOG_PKGMAN=${{ inputs.package_man || 'apt' }}" >> $GITHUB_ENV
           echo "FOGAPI_REPO=${{ inputs.fogapi_repo || 'darksidemilk/FogApi' }}" >> $GITHUB_ENV
-          echo "FOGAPI_REF=${{ inputs.fogapi_ref || '' }}" >> $GITHUB_ENV
-          echo "EXPECT_OPENAPI=${{ inputs.expect_openapi || 'false' }}" >> $GITHUB_ENV
+          echo "FOGAPI_REF=${{ inputs.fogapi_ref || 'fix/fog16-paging-truncation' }}" >> $GITHUB_ENV
+          echo "EXPECT_OPENAPI=${{ inputs.expect_openapi || 'true' }}" >> $GITHUB_ENV
 
       - name: Ensure crun is new enough for distrobox
         env:
@@ -350,6 +350,24 @@ jobs:
             [ "$A" = "$B" ] && ok "both paths serve the same document"               || no "system/openapi and swagger.json differ"
           fi
 
+          echo "=== paging bounds ==="
+          # Published so a client can size its requests from what this server
+          # does rather than a number copied out of the source. system/info
+          # carries them too, because the document is far too large to fetch
+          # for two integers.
+          INFO=$(get "${AUTH[@]}" "${FOG_BASE_URL}system/info" | sed '$d')
+          MAXROWS=$(echo "$INFO" | jq -r '.paging.maxRows // empty')
+          EXPANDMAX=$(echo "$INFO" | jq -r '.paging.expandMaxItems // empty')
+          if [ -n "$MAXROWS" ]; then
+            ok "system/info publishes maxRows=$MAXROWS expandMaxItems=$EXPANDMAX"
+            SPECMAX=$(get "${FOG_BASE_URL}system/openapi" | sed '$d' \
+              | jq -r '["x-fog-paging"] as $k | getpath($k).maxRows // empty' 2>/dev/null)
+            [ "$SPECMAX" = "$MAXROWS" ] && ok "the document agrees with system/info" \
+              || no "document says maxRows=$SPECMAX, system/info says $MAXROWS"
+          else
+            soft "system/info does not publish paging bounds"
+          fi
+
           echo ""
           echo "PASSED: $PASS   FAILED: $FAIL"
           [ "$FAIL" -eq 0 ]
@@ -375,20 +393,15 @@ jobs:
           sudo update-ca-certificates
           echo "trusted the FOG CA"
 
-      - name: Run the FogApi real-server suite
-        # Opt-in. GitHub's ubuntu images ship PowerShell, and the container is
-        # reachable from the runner, so this needs nothing installed in the
-        # container -- the module runs here and talks to the server there.
+      - name: Set up FogApi
         if: ${{ env.FOGAPI_REF != '' }}
         shell: pwsh
         run: |
           Write-Host "FogApi $env:FOGAPI_REPO @ $env:FOGAPI_REF against $env:FOG_BASE_URL"
-          git clone -b $env:FOGAPI_REF "https://github.com/$($env:FOGAPI_REPO).git" fogapi
-          Set-Location fogapi
-
-          # Write the settings file the module expects rather than driving
-          # Set-FogServerSettings, which refuses non-interactively when a
-          # value still looks like the placeholder text.
+          git clone -q -b $env:FOGAPI_REF "https://github.com/$($env:FOGAPI_REPO).git" fogapi
+          # Written directly rather than through Set-FogServerSettings, which
+          # refuses non-interactively while a value still looks like the
+          # placeholder text it ships with.
           $settingsDir = Join-Path $HOME '.FogApi'
           New-Item -ItemType Directory -Force -Path $settingsDir | Out-Null
           @{
@@ -397,8 +410,80 @@ jobs:
               fogServer    = "$($env:FOG_HTTPPROTO)://$($env:FOG_IP)"
           } | ConvertTo-Json | Set-Content -Path (Join-Path $settingsDir 'api-settings.json')
 
+      - name: Verify paging against the live server
+        # The suite's paging tests are all mocked, and the real-server contexts
+        # create one host and one group -- you cannot page one row. So nothing
+        # in the suite makes a paged request to a real server, which is exactly
+        # what the truncation bug was about. This seeds enough rows to force
+        # several pages and then checks the client actually walked them.
+        #
+        # Runs before the suite so a known-failing suite cannot mask it.
+        if: ${{ env.FOGAPI_REF != '' }}
+        shell: pwsh
+        run: |
+          Set-Location fogapi
           Import-Module ./FogApi/FogApi.psd1 -Force
-          Write-Host "version reported by the server: $(Get-FogVersion -ErrorAction Continue)"
+          $ErrorActionPreference = 'Stop'
+          $pass = 0; $fail = 0
+          function ok($m) { $script:pass++; Write-Host "  PASS  $m" }
+          function no($m) { $script:fail++; Write-Host "  FAIL  $m" }
+
+          Write-Host "server version: $(Get-FogVersion -wa 0)"
+
+          $seed = 25
+          Write-Host "seeding $seed hosts..."
+          1..$seed | ForEach-Object {
+              $mac = '02:00:00:{0:x2}:{1:x2}:{2:x2}' -f (($_ -shr 16) -band 255), (($_ -shr 8) -band 255), ($_ -band 255)
+              $json = @{ name = "pagetest-$_"; macs = @($mac) } | ConvertTo-Json -Compress
+              New-FogObject -type object -coreObject host -jsonData $json | Out-Null
+          }
+
+          # /count reports the true filtered total and ignores paging, so it is
+          # an independent answer to "how many are there" -- the one number the
+          # truncation bug could not fake.
+          $total = [int](Invoke-FogApi -uriPath 'host/count').total
+          if ($total -ge $seed) { ok "host/count reports $total rows" }
+          else { no "host/count reports $total, expected at least $seed" }
+
+          # A page size well under the total forces a multi-page walk. This is
+          # the same shape as the 10000 row cap, just reachable without seeding
+          # ten thousand hosts.
+          if (Get-Command Get-FogPagedResult -ErrorAction SilentlyContinue) {
+              $paged = Get-FogPagedResult -uriPath host -PageSize 4
+              $n = @($paged.data).Count
+              if ($n -eq $total) { ok "Get-FogPagedResult -PageSize 4 walked all $n rows" }
+              else { no "Get-FogPagedResult returned $n of $total rows" }
+
+              $ids = @($paged.data.id)
+              $unique = @($ids | Sort-Object -Unique).Count
+              if ($unique -eq $ids.Count) { ok "no row repeated across page boundaries" }
+              else { no "$($ids.Count - $unique) duplicate rows across pages" }
+
+              $first = Get-FogPagedResult -uriPath host -PageSize 4 -First 6
+              if (@($first.data).Count -eq 6) { ok "-First 6 stopped at 6 rows" }
+              else { no "-First 6 returned $(@($first.data).Count) rows" }
+          } else {
+              Write-Host "  ----  Get-FogPagedResult is not public on this ref, skipping its cases"
+          }
+
+          # The call an ordinary user makes. Before the fix this silently
+          # returned a truncated list on any server past the cap.
+          $hosts = @(Get-FogHosts)
+          if ($hosts.Count -eq $total) { ok "Get-FogHosts returned all $total rows" }
+          else { no "Get-FogHosts returned $($hosts.Count) of $total rows" }
+
+          Write-Host ""
+          Write-Host "PASSED: $pass   FAILED: $fail"
+          if ($fail -gt 0) { exit 1 }
+
+      - name: Run the FogApi real-server suite
+        # Opt-in. GitHub's ubuntu images ship PowerShell, and the container is
+        # reachable from the runner, so this needs nothing installed in the
+        # container -- the module runs here and talks to the server there.
+        if: ${{ env.FOGAPI_REF != '' }}
+        shell: pwsh
+        run: |
+          Set-Location fogapi
           ./Invoke-FogApiTests.ps1 -RealServer -CI
 
       - name: Collect logs
