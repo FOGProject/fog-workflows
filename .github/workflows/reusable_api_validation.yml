@@ -52,6 +52,11 @@ on:
       additional_packages:
         required: false
         type: string
+      expect_openapi:
+        description: "require the OpenAPI endpoints; off for refs that predate them"
+        required: false
+        default: false
+        type: boolean
       fogapi_ref:
         description: "FogApi branch to run the real-server suite from; empty to skip"
         required: false
@@ -84,6 +89,11 @@ on:
       additional_packages:
         required: false
         type: string
+      expect_openapi:
+        description: "require the OpenAPI endpoints; off for refs that predate them"
+        required: false
+        default: false
+        type: boolean
       fogapi_ref:
         description: "FogApi branch to run the real-server suite from; empty to skip"
         required: false
@@ -120,6 +130,7 @@ jobs:
           echo "FOG_PKGMAN=${{ inputs.package_man || 'apt' }}" >> $GITHUB_ENV
           echo "FOGAPI_REPO=${{ inputs.fogapi_repo || 'darksidemilk/FogApi' }}" >> $GITHUB_ENV
           echo "FOGAPI_REF=${{ inputs.fogapi_ref || '' }}" >> $GITHUB_ENV
+          echo "EXPECT_OPENAPI=${{ inputs.expect_openapi || 'false' }}" >> $GITHUB_ENV
 
       - name: Ensure crun is new enough for distrobox
         env:
@@ -297,15 +308,23 @@ jobs:
             || no "host list without tokens returned $CODE, expected 403"
 
           echo "=== openapi document ==="
+          # These endpoints only exist on refs that carry the generator. On
+          # anything older the router never allowlists the path, so it asks
+          # for tokens and answers 403 rather than 404 -- which reads like a
+          # permissions bug if you are not expecting it. Absent is only a
+          # failure when the caller said to expect them.
+          soft(){ if [ "$EXPECT_OPENAPI" = "true" ]; then no "$1"; else echo "  ----  $1 (not required for this ref)"; fi; }
+          GOT_DOC=0
           for PATHPART in system/openapi swagger.json; do
             RESP=$(get "${FOG_BASE_URL}${PATHPART}")
             CODE=$(echo "$RESP" | tail -1)
             DOC=$(echo "$RESP" | sed '$d')
             if [ "$CODE" != "200" ]; then
-              no "${PATHPART} returned $CODE"
+              soft "${PATHPART} returned $CODE"
               continue
             fi
             ok "${PATHPART} 200"
+            GOT_DOC=$((GOT_DOC+1))
             if ! echo "$DOC" | jq -e . >/dev/null 2>&1; then
               no "${PATHPART} is not valid json"; continue
             fi
@@ -319,16 +338,17 @@ jobs:
             # 200 and still parses. Near-empty is the realistic failure, not
             # malformed, so the floor is what actually proves the generator
             # walked the class list on a running server.
-            [ "$NP" -gt 300 ] && ok "${PATHPART} has $NP paths (>300)" \
-              || no "${PATHPART} only has $NP paths - model classes likely failed to resolve"
-            [ "$NS" -gt 40 ] && ok "${PATHPART} has $NS schemas (>40)" \
-              || no "${PATHPART} only has $NS schemas"
+            [ "$NP" -gt 300 ] && ok "${PATHPART} has $NP paths (>300)"               || no "${PATHPART} only has $NP paths - model classes likely failed to resolve"
+            [ "$NS" -gt 40 ] && ok "${PATHPART} has $NS schemas (>40)"               || no "${PATHPART} only has $NS schemas"
           done
 
-          A=$(get "${FOG_BASE_URL}system/openapi" | sed '$d' | jq -S . 2>/dev/null | md5sum)
-          B=$(get "${FOG_BASE_URL}swagger.json"   | sed '$d' | jq -S . 2>/dev/null | md5sum)
-          [ "$A" = "$B" ] && ok "both paths serve the same document" \
-            || no "system/openapi and swagger.json differ"
+          # Only meaningful when both actually returned a document. Comparing
+          # two identical 403 bodies passed, which is worse than not checking.
+          if [ "$GOT_DOC" -eq 2 ]; then
+            A=$(get "${FOG_BASE_URL}system/openapi" | sed '$d' | jq -S . 2>/dev/null | md5sum)
+            B=$(get "${FOG_BASE_URL}swagger.json"   | sed '$d' | jq -S . 2>/dev/null | md5sum)
+            [ "$A" = "$B" ] && ok "both paths serve the same document"               || no "system/openapi and swagger.json differ"
+          fi
 
           echo ""
           echo "PASSED: $PASS   FAILED: $FAIL"
