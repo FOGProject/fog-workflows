@@ -125,12 +125,12 @@ jobs:
         # inputs is null on pull_request, so every value needs a fallback.
         run: |
           echo "FOG_REPO=${{ inputs.repo || 'FOGProject/fogproject' }}" >> $GITHUB_ENV
-          echo "FOG_REF=${{ inputs.ref || 'working-1.6' }}" >> $GITHUB_ENV
+          echo "FOG_REF=${{ inputs.ref || 'api-openapi-spec' }}" >> $GITHUB_ENV
           echo "FOG_DISTRO=${{ inputs.distro || 'docker.io/library/ubuntu:24.04' }}" >> $GITHUB_ENV
           echo "FOG_PKGMAN=${{ inputs.package_man || 'apt' }}" >> $GITHUB_ENV
           echo "FOGAPI_REPO=${{ inputs.fogapi_repo || 'darksidemilk/FogApi' }}" >> $GITHUB_ENV
           echo "FOGAPI_REF=${{ inputs.fogapi_ref || '' }}" >> $GITHUB_ENV
-          echo "EXPECT_OPENAPI=${{ inputs.expect_openapi || 'false' }}" >> $GITHUB_ENV
+          echo "EXPECT_OPENAPI=${{ inputs.expect_openapi || 'true' }}" >> $GITHUB_ENV
 
       - name: Ensure crun is new enough for distrobox
         env:
