@@ -1,0 +1,88 @@
+name: fogproject test suite
+
+# Runs fogproject's own tests/run-all.sh against a pull request.
+#
+# Called as a reusable workflow by a small stub living in fogproject
+# (.github/workflows/tests.yml), because a pull_request trigger can only
+# fire from the repository the PR is opened against. The stub is six lines
+# and never changes; everything that might change lives here, so a fix to
+# the runner covers every branch at once instead of being propagated by
+# hand.
+#
+# On the push-trigger incident documented at the top of check-fog-version.yml:
+# that loop existed because the workflow it triggered PUSHED A COMMIT back
+# into fogproject, which re-fired the stub. This one writes nothing -- no
+# token beyond the caller's read-only GITHUB_TOKEN, no commit, no API call --
+# so there is nothing it can do that could trigger another run of itself.
+# A pull_request trigger is also not a push trigger: it fires on PR events,
+# and the bot pushes that caused the runaway were direct-to-branch.
+#
+# Why this is worth having at all: every gate written across the Phase 0-3
+# modernization -- 43 of them, several mutation-verified -- ran only when
+# somebody remembered to run them locally. tests/run-all.sh says in its own
+# docblock that CI is where it belongs; until now there was no CI to put it
+# in. See fogproject GH-1136 for the class of bug these catch.
+
+on:
+  workflow_call:
+
+concurrency:
+  group: fogproject-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    name: tests (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 7.4 is fogproject's supported floor (commons/init.php _verCheck);
+        # 8.3 is what the project is developed on. Running both is what
+        # catches the documented failure where PHP-8-only syntax lints
+        # clean and then dies as a bodyless 500 on a 7.4 server.
+        php: ['7.4', '8.3']
+
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@v4
+
+      - name: Set up PHP ${{ matrix.php }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          # gettext is not optional. Seven tests exercise code paths that
+          # call _(), and without the extension they die on "Call to
+          # undefined function FOG\_()" -- which reads as a failing suite
+          # rather than a missing extension. openssl is used by the PKI
+          # tests. Both verified against php:7.4-cli, where the bare image
+          # fails 7 of 43 for exactly this reason.
+          extensions: gettext, openssl, json
+          coverage: none
+
+      - name: Install efitools
+        # secureboot-authvars.test.sh skips itself when efitools is absent,
+        # and run-all.sh counts a skip as a pass. Installing it is the
+        # difference between that test being enforced and being decorative,
+        # which is the whole point of this workflow.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq efitools
+
+      - name: Run the suite
+        # Several tests enumerate the tree with `git ls-files` and fail
+        # closed ("Is this a git checkout?") if it returns nothing, so the
+        # checkout has to stay a real repository -- do not swap this for an
+        # archive download.
+        run: sh tests/run-all.sh | tee "$RUNNER_TEMP/suite.txt"
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo "### PHP ${{ matrix.php }}"
+            echo ''
+            echo '```'
+            tail -n 5 "$RUNNER_TEMP/suite.txt" 2>/dev/null || echo 'suite produced no output'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
