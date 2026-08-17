@@ -9,7 +9,8 @@ name: fogproject test suite
 # the runner covers every branch at once instead of being propagated by
 # hand.
 #
-# On the push-trigger incident documented at the top of check-fog-version.yml:
+# On the push-trigger incident documented at the top of
+# update-lang-fix-psr-and-sync-version.yml:
 # that loop existed because the workflow it triggered PUSHED A COMMIT back
 # into fogproject, which re-fired the stub. This one writes nothing -- no
 # token beyond the caller's read-only GITHUB_TOKEN, no commit, no API call --
