@@ -50,6 +50,28 @@ name: Update Language Files, Fix PSR2, and Sync FOG Version
 # put 30 commits on dev-branch in ~20 minutes before it was caught. A cron
 # tick cannot look at what was last pushed, so it cannot feed itself.
 #
+# IT IS ALSO MERGE-TRIGGERED NOW, AND WHY THAT IS NOT THE SAME MISTAKE
+#
+# fogproject's .github/workflows/sync-generated-files.yml calls this over
+# workflow_call when a PR is merged into working-1.6 or dev-branch. That
+# closes a real gap the schedule alone leaves: the pre-commit hook is
+# client-side, so a PR merged through GitHub's web UI never runs it and the
+# version stays wrong until the next cron tick, up to a day later.
+#
+# The property that makes it safe is the event, not restraint. That stub
+# triggers on `pull_request_target: closed`, and the push below is a direct
+# push to a branch, not a PR merge -- so the bot cannot raise the event that
+# would call it again. The loop is closed by the shape of the trigger, the
+# same way a cron tick cannot feed itself, rather than by an actor-name
+# guard that has to be kept correct.
+#
+# The schedule stays exactly as it is, and is still the only cover for
+# direct pushes and for rc-*/feature-* branches. rc-* in particular must
+# NOT be merge-synced: fog-version.sh increments rc off the committed
+# suffix rather than a commit count, so it reports drift on every run, and
+# a per-merge sync there would bump the RC suffix on every merge. The
+# stub's branch allowlist is what keeps rc-* on the schedule.
+#
 # Never touches `stable` - the branch filter below excludes it, because
 # that branch's version and contents are owned by stable-releases.yml.
 #
@@ -308,10 +330,29 @@ jobs:
           git commit -m "$message"
           git push origin "HEAD:${{ matrix.branch }}"
 
+      - uses: actions/create-github-app-token@v3
+        id: badge-token
+        # Deliberately a second token rather than widening the one above: that
+        # one is scoped to fogproject because that is the only repo it pushes
+        # to, and this step writes to fog-workflows and nothing else.
+        if: contains(fromJson('["dev-branch", "working-1.6"]'), matrix.branch)
+        with:
+          client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+          private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
+          owner: FOGProject
+          repositories: "fog-workflows"
+
       - name: Update version badge
         if: contains(fromJson('["dev-branch", "working-1.6"]'), matrix.branch)
         env:
-          GH_TOKEN: ${{ github.token }}
+          # Was github.token, which works only while this workflow runs in
+          # fog-workflows. Under workflow_call github.token is the CALLER's
+          # token, and a GITHUB_TOKEN cannot write to another repository -- so
+          # the moment fogproject started calling this on merge, every run
+          # 403'd here and failed the job under `set -e`. The App token is what
+          # CLAUDE.md asks for on this repo regardless: "don't 'simplify' those
+          # back to the default GITHUB_TOKEN just because the call is same-repo."
+          GH_TOKEN: ${{ steps.badge-token.outputs.token }}
         run: |
           set -e
           path="badges/${{ matrix.branch }}.json"

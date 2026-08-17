@@ -39,7 +39,8 @@ reading Actions run logs/summaries in GitHub.
 
 ## Workflows and how they relate
 
-`check-fog-version.yml`, `stable-releases.yml`, and `fog-release-immortality.yml` authenticate
+`update-lang-fix-psr-and-sync-version.yml`, `stable-releases.yml`, and
+`fog-release-immortality.yml` authenticate
 to the `FOGProject` org as a GitHub App (`create-github-app-token` using
 `vars.FOG_WORKFLOWS_APPID` / `secrets.FOG_WORKFLOWS_PRIVATE_KEY`), not the default
 `GITHUB_TOKEN`. This is the standard for every job in this repo's centralized workflows, not
@@ -73,12 +74,22 @@ don't "simplify" those back to the default `GITHUB_TOKEN` just because the call 
      that branch (no PR — mirrors what the local hook does), with a message describing whichever
      combination of translations/PSR2/version actually changed.
   6. For `dev-branch` and `working-1.6`, also commits an updated `badges/<branch>.json` in
-     *this* repo via the Contents API.
-  - It is a **scheduled** trigger, not push-triggered, on purpose: an earlier push-triggered
-    design (a stub in `fogproject` calling this as a reusable workflow) caused a runaway loop —
-    the bot's own fixup push re-triggered the stub, which re-ran this workflow, which pushed
-    another fixup, producing ~30 unwanted commits in ~20 minutes. See the comment block at the
-    top of the file before changing the trigger model.
+     *this* repo via the Contents API, using its own App token scoped to `fog-workflows`. Not
+     `github.token`: under `workflow_call` that is the *caller's* token, which cannot write to
+     another repository.
+  - It runs on a **schedule** and on **merge**, and the difference between those two entry
+    points matters. The schedule is the only cover for direct pushes and for `rc-*`/`feature-*`.
+    The merge path is `fogproject`'s `sync-generated-files.yml`, which calls this over
+    `workflow_call` on `pull_request_target: closed` for merges into `working-1.6`/`dev-branch`,
+    and exists because the pre-commit hook is client-side and never runs for a PR merged in the
+    web UI.
+  - It is **not push-triggered**, on purpose: an earlier push-triggered design (a stub in
+    `fogproject` calling this as a reusable workflow) caused a runaway loop — the bot's own
+    fixup push re-triggered the stub, which re-ran this workflow, which pushed another fixup,
+    producing ~30 unwanted commits in ~20 minutes. A `pull_request_target` merge event is safe
+    where a push event is not, because the bot pushes directly to the branch and a direct push
+    is not a PR merge — it cannot raise the event that calls this again. See the comment block
+    at the top of the file before changing the trigger model.
   - Never runs against `stable` — that branch's version is owned exclusively by
     `stable-releases.yml`.
   - This used to be two separate workflows (a version check and a generated-files sync) on a
@@ -153,9 +164,13 @@ don't "simplify" those back to the default `GITHUB_TOKEN` just because the call 
   keeps every action across all of this repo's unified/centralized workflows attributed to the
   same GitHub App bot identity, so run history and audit trails stay consistent regardless of
   which repo a given job happens to touch.
-- Don't reintroduce push-triggered cross-repo workflows for version syncing — use scheduled
-  and `workflow_call`/`workflow_dispatch` triggers instead, per the incident documented in
-  `update-lang-fix-psr-and-sync-version.yml`.
+- Don't trigger version syncing from any event the sync bot's own push can raise. In practice
+  that means **never `push`**, per the incident documented in
+  `update-lang-fix-psr-and-sync-version.yml`: the bot pushes its fixup directly to the branch,
+  a `push` trigger sees it, and the workflow feeds itself. Scheduled,
+  `workflow_call`/`workflow_dispatch`, and `pull_request_target: closed` (a merge — which the
+  bot's direct push is not) are all safe for the same reason, and all three are in use. The
+  test to apply to a new trigger is that one question, not whether it happens to be a cron.
 - Keep version/translation-generation logic (`fog-version.sh` / `apply-fog-version.sh` /
   `update-language.sh`) living in `fogproject`, not duplicated here — this repo should only
   *call* those scripts. PSR2 formatting is the one exception, since fogproject only ever invokes
