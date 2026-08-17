@@ -1,0 +1,71 @@
+name: fog-plugins test suite
+
+# Runs fog-plugins' own tests/run-all.sh against a pull request.
+#
+# The sibling of fogproject-tests.yml, and a separate workflow rather than a
+# parameter on it: that one installs efitools for a shell test this repository
+# does not have, and checks out a tree whose layout it assumes. The two suites
+# share a runner shape, not a runner.
+#
+# Called as a reusable workflow by a small stub in fog-plugins
+# (.github/workflows/tests.yml), because a pull_request trigger can only fire
+# from the repository the PR is opened against.
+#
+# Why it is worth having: the plugin tests are the only automated check on
+# code that decides who becomes an administrator of a FOG server -- the OIDC
+# provider rules, the flow's state and nonce handling, and the permissions on
+# the group association tabs. Until now nothing ran them but a maintainer
+# remembering to.
+#
+# This workflow writes nothing: no commit, no API call, no token beyond the
+# caller's read-only GITHUB_TOKEN. See the note at the top of
+# update-lang-fix-psr-and-sync-version.yml for why that matters here.
+
+on:
+  workflow_call:
+
+concurrency:
+  group: fog-plugins-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    name: tests (PHP ${{ matrix.php }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # 7.4 is the FOG floor a plugin has to keep working on; 8.3 is what
+        # development happens on. Running both is what catches PHP-8-only
+        # syntax, which lints clean and then dies as a bodyless 500 on a 7.4
+        # server -- and a plugin fails that way inside somebody else's page.
+        php: ['7.4', '8.3']
+
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@v4
+
+      - name: Set up PHP ${{ matrix.php }}
+        uses: shivammathur/setup-php@v2
+        with:
+          php-version: ${{ matrix.php }}
+          # The safety tests call the models for real rather than reading
+          # their source, and those throw through _(). Two of them define a
+          # fallback when the extension is absent, but installing it is what
+          # exercises the same call the server makes.
+          extensions: gettext, openssl, json
+          coverage: none
+
+      - name: Run the suite
+        run: sh tests/run-all.sh | tee "$RUNNER_TEMP/suite.txt"
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "### PHP ${{ matrix.php }}"
+            echo ''
+            echo '```'
+            tail -n 5 "$RUNNER_TEMP/suite.txt" 2>/dev/null || echo 'suite produced no output'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
