@@ -61,7 +61,35 @@ jobs:
           extensions: gettext, openssl, json
           coverage: none
 
+      - name: Does this branch have the Secure Boot test?
+        id: sb_test
+        # Same reasoning as the composer probe in the vendor job below: this
+        # workflow is shared by every fogproject branch, and only the 1.6 line
+        # carries tests/secureboot-authvars.test.sh. On dev-branch the apt
+        # install below buys nothing at all -- and it is not free. It is the
+        # single flakiest step here: a transient apt failure or a slow mirror
+        # wedges it for twenty minutes and takes the whole run with it, which
+        # is how a green dev-branch pull request came to need a manual rerun
+        # (fogproject#1170).
+        #
+        # Decided from the tree rather than from the branch name, because the
+        # branch that has the test is a thing that will change and the presence
+        # of the file is the actual precondition.
+        run: |
+          if [ -f tests/secureboot-authvars.test.sh ]; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+            {
+              echo '### efitools'
+              echo ''
+              echo 'No `tests/secureboot-authvars.test.sh` on this branch, so'
+              echo 'there is nothing for efitools to enforce. Not installed.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
       - name: Install efitools
+        if: steps.sb_test.outputs.present == 'true'
         # secureboot-authvars.test.sh skips itself when efitools is absent,
         # and run-all.sh counts a skip as a pass. Installing it is the
         # difference between that test being enforced and being decorative,
