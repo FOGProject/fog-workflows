@@ -78,18 +78,26 @@ don't "simplify" those back to the default `GITHUB_TOKEN` just because the call 
      `github.token`: under `workflow_call` that is the *caller's* token, which cannot write to
      another repository.
   - It runs on a **schedule** and on **merge**, and the difference between those two entry
-    points matters. The schedule is the only cover for direct pushes and for `rc-*`/`feature-*`.
-    The merge path is `fogproject`'s `sync-generated-files.yml`, which calls this over
-    `workflow_call` on `pull_request_target: closed` for merges into `working-1.6`/`dev-branch`,
-    and exists because the pre-commit hook is client-side and never runs for a PR merged in the
-    web UI.
+    points matters. The schedule is the only cover for direct pushes, for merged fork PRs, and
+    for `rc-*`/`feature-*`. The merge path is `fogproject`'s `sync-generated-files.yml`, which
+    calls this over `workflow_call` on `pull_request: types: [closed]` for merges into
+    `working-1.6`/`dev-branch`, and exists because the pre-commit hook is client-side and never
+    runs for a PR merged in the web UI.
+  - **`pull_request`, not `pull_request_target`** — worth knowing, because the latter looks like
+    the better choice (it is the variant that gets secrets on a fork PR) and was tried first. It
+    never fired once: GitHub reads a `pull_request_target` workflow from the repository's
+    **default** branch (`stable`), not from the PR's base branch, so a stub on
+    `working-1.6`/`dev-branch` is never consulted — it did not even register as a workflow, and
+    four PRs merged without it running. `pull_request` is read from the base branch. The cost is
+    that a merged fork PR has no secrets, so the stub's same-repo guard skips it and the
+    schedule picks it up.
   - It is **not push-triggered**, on purpose: an earlier push-triggered design (a stub in
     `fogproject` calling this as a reusable workflow) caused a runaway loop — the bot's own
     fixup push re-triggered the stub, which re-ran this workflow, which pushed another fixup,
-    producing ~30 unwanted commits in ~20 minutes. A `pull_request_target` merge event is safe
-    where a push event is not, because the bot pushes directly to the branch and a direct push
-    is not a PR merge — it cannot raise the event that calls this again. See the comment block
-    at the top of the file before changing the trigger model.
+    producing ~30 unwanted commits in ~20 minutes. A merge event is safe where a push event is
+    not, because the bot pushes directly to the branch and a direct push is not a PR merge — it
+    cannot raise the event that calls this again. See the comment block at the top of the file
+    before changing the trigger model.
   - Never runs against `stable` — that branch's version is owned exclusively by
     `stable-releases.yml`.
   - This used to be two separate workflows (a version check and a generated-files sync) on a
@@ -168,9 +176,15 @@ don't "simplify" those back to the default `GITHUB_TOKEN` just because the call 
   that means **never `push`**, per the incident documented in
   `update-lang-fix-psr-and-sync-version.yml`: the bot pushes its fixup directly to the branch,
   a `push` trigger sees it, and the workflow feeds itself. Scheduled,
-  `workflow_call`/`workflow_dispatch`, and `pull_request_target: closed` (a merge — which the
+  `workflow_call`/`workflow_dispatch`, and `pull_request: types: [closed]` (a merge — which the
   bot's direct push is not) are all safe for the same reason, and all three are in use. The
   test to apply to a new trigger is that one question, not whether it happens to be a cron.
+- Separately from that safety question, check **which ref a trigger is read from** before
+  relying on it. Most events — including `pull_request_target`, `schedule` and
+  `workflow_dispatch` — are read only from the repository's default branch, so a workflow file
+  on a non-default branch is silently never consulted; `push`, `create` and `pull_request`
+  resolve per-ref. A workflow that is correct but never runs looks exactly like one that ran and
+  found nothing to do, so confirm a new trigger actually produced a run rather than assuming it.
 - Keep version/translation-generation logic (`fog-version.sh` / `apply-fog-version.sh` /
   `update-language.sh`) living in `fogproject`, not duplicated here — this repo should only
   *call* those scripts. PSR2 formatting is the one exception, since fogproject only ever invokes

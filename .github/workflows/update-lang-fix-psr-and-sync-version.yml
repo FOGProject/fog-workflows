@@ -59,18 +59,29 @@ name: Update Language Files, Fix PSR2, and Sync FOG Version
 # version stays wrong until the next cron tick, up to a day later.
 #
 # The property that makes it safe is the event, not restraint. That stub
-# triggers on `pull_request_target: closed`, and the push below is a direct
-# push to a branch, not a PR merge -- so the bot cannot raise the event that
-# would call it again. The loop is closed by the shape of the trigger, the
-# same way a cron tick cannot feed itself, rather than by an actor-name
-# guard that has to be kept correct.
+# triggers on `pull_request: types: [closed]`, and the push below is a
+# direct push to a branch, not a PR merge -- so the bot cannot raise the
+# event that would call it again. The loop is closed by the shape of the
+# trigger, the same way a cron tick cannot feed itself, rather than by an
+# actor-name guard that has to be kept correct.
+#
+# It is `pull_request` and not `pull_request_target`, which is worth knowing
+# because the latter looks like the better choice: it is the variant that
+# gets secrets on a fork PR. It was tried first and never fired once.
+# GitHub reads a `pull_request_target` workflow from the repository's
+# DEFAULT branch (`stable`), not from the PR's base branch, so a stub living
+# on working-1.6/dev-branch is never consulted -- it did not even register
+# as a workflow, and four PRs merged without it running. The cost of using
+# `pull_request` instead is that a merged FORK PR gets no secrets and is
+# therefore skipped by the stub's same-repo guard; the schedule below picks
+# those up, exactly as it does direct pushes.
 #
 # The schedule stays exactly as it is, and is still the only cover for
-# direct pushes and for rc-*/feature-* branches. rc-* in particular must
-# NOT be merge-synced: fog-version.sh increments rc off the committed
-# suffix rather than a commit count, so it reports drift on every run, and
-# a per-merge sync there would bump the RC suffix on every merge. The
-# stub's branch allowlist is what keeps rc-* on the schedule.
+# direct pushes, for merged fork PRs, and for rc-*/feature-* branches. rc-*
+# in particular must NOT be merge-synced: fog-version.sh increments rc off
+# the committed suffix rather than a commit count, so it reports drift on
+# every run, and a per-merge sync there would bump the RC suffix on every
+# merge. The stub's branch allowlist is what keeps rc-* on the schedule.
 #
 # Never touches `stable` - the branch filter below excludes it, because
 # that branch's version and contents are owned by stable-releases.yml.
