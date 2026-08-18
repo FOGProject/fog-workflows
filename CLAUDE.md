@@ -179,6 +179,12 @@ don't "simplify" those back to the default `GITHUB_TOKEN` just because the call 
   `workflow_call`/`workflow_dispatch`, and `pull_request: types: [closed]` (a merge — which the
   bot's direct push is not) are all safe for the same reason, and all three are in use. The
   test to apply to a new trigger is that one question, not whether it happens to be a cron.
+- A reusable workflow's `permissions:` block is a **request**, and a caller granting less is a
+  hard startup error — `The workflow is requesting 'contents: write', but is only allowed
+  'contents: read'` — not a silent capping. No jobs run and no logs are written, so it surfaces
+  only as "a workflow file issue". Keep a reusable workflow's request as low as it genuinely
+  needs (these workflows do their writing with App tokens, so `contents: read` is usually
+  right); raising it forces every caller to grant the same, and breaks the ones that don't.
 - Separately from that safety question, check **which ref a trigger is read from** before
   relying on it. Most events — including `pull_request_target`, `schedule` and
   `workflow_dispatch` — are read only from the repository's default branch, so a workflow file

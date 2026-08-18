@@ -114,7 +114,28 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: write
+  # `read`, and deliberately not `write`, because nothing here uses the ambient
+  # GITHUB_TOKEN any more: the checkout, the commit/push and the version badge
+  # all run on GitHub App tokens. What this line really controls now is who can
+  # CALL this workflow.
+  #
+  # A reusable workflow's `permissions:` is a REQUEST, and GitHub refuses the
+  # call outright when a caller grants less -- it is a hard startup error, not a
+  # silent capping:
+  #
+  #   The workflow is requesting 'contents: write', but is only allowed
+  #   'contents: read'.
+  #
+  # No jobs run, no logs are produced, and the run just shows "a workflow file
+  # issue" -- which is how fogproject's merge stub failed on its first two real
+  # merges while asking for the correct, least-privilege `contents: read`.
+  #
+  # So do not raise this back to `write` to be safe. Raising it forces every
+  # caller to grant write for a token none of them use, and breaks at startup
+  # any caller that does not. If a step here ever genuinely needs the ambient
+  # token, give that step its own App token instead, the way the badge step
+  # does.
+  contents: read
 
 env:
   # Pinned, not "latest". An unpinned formatter is a second source of drift:
