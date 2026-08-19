@@ -232,3 +232,149 @@ jobs:
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  schema:
+    name: schema on ${{ matrix.server }}
+    runs-on: ubuntu-latest
+
+    # Nothing in CI has ever executed FOG's schema against a database. Four
+    # independent reasons, all true before this job existed:
+    #
+    #   1. the `suite` job above runs on a PHP matrix with no database at all;
+    #   2. tests/schema-portable-collation.test.php is textual BY DESIGN -- its
+    #      docblock says commons/schema.php "calls self::$DB->query() at file
+    #      scope and cannot be included without a database";
+    #   3. run_all_distros.yml is workflow_dispatch only, so distro installs
+    #      never fire on a pull request;
+    #   4. reusable_distro_workflow.yml cloned a hardcoded dev-branch, so even a
+    #      manual dispatch never installed the 1.6 schema.
+    #
+    # fogproject GH-1147's own commit message states the problem: "this cannot
+    # be caught by the person introducing it: on the generating server every one
+    # of these statements is valid." Only an older server ever sees it. This is
+    # how an older server gets to see it. fogproject GH-1221.
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # The realistic floor, and the exact version in the GH-1147 report
+          # (10.5.29 on Rocky 9). Also the first time anyone has actually RUN
+          # the CHARSET=utf8mb3 probe GH-1152 flags as unverified inference.
+          - server: mariadb:10.5
+            image: mariadb:10.5
+            tolerated: false
+          # First version on the far side of the collation boundary: 11.4 made
+          # utf8mb3_uca1400_ai_ci the default for the Unicode charsets.
+          #
+          # continue-on-error because the collation assertion is EXPECTED to
+          # fail here until fogproject GH-1152 is decided -- that failure is the
+          # evidence GH-1152 says it is missing, and this is how it gets
+          # measured rather than argued. Reddening every pull request over an
+          # undecided question teaches people to ignore red checks, which is the
+          # same reasoning already written into the composer_tree probe above.
+          #
+          # REMOVE THIS the moment GH-1152 lands. It is not a standing excuse.
+          - server: mariadb:11.4 (GH-1152, non-blocking)
+            image: mariadb:11.4
+            tolerated: true
+          # MySQL has never had the UCA-14.0.0 collations at all, so it catches
+          # the same class of failure from the other vendor.
+          - server: mysql:8.0
+            image: mysql:8.0
+            tolerated: false
+
+    services:
+      db:
+        image: ${{ matrix.image }}
+        env:
+          # Both spellings deliberately: the mariadb images read MARIADB_*, and
+          # mysql:8.0 reads MYSQL_*. Setting both lets one services block cover
+          # both vendors instead of needing a matrix of env blocks as well.
+          MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "yes"
+          MYSQL_ALLOW_EMPTY_PASSWORD: "yes"
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mariadb-admin ping -h 127.0.0.1 || mysqladmin ping -h 127.0.0.1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@v4
+
+      - name: Does this branch have the schema execution test?
+        id: schema_test
+        # Same probe pattern as sb_test and composer_tree above, and for the
+        # same reason: this workflow is shared by every fogproject branch, and
+        # only the 1.6 line carries tests/schema-executes.test.php. Decided from
+        # the tree rather than the branch name, because the branch that has the
+        # test is a thing that will change and the presence of the file is the
+        # actual precondition.
+        run: |
+          if [ -f tests/schema-executes.test.php ]; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+            {
+              echo '### schema'
+              echo ''
+              echo 'No `tests/schema-executes.test.php` on this branch, so there'
+              echo 'is nothing to execute. Skipped.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Set up PHP 7.4
+        if: steps.schema_test.outputs.present == 'true'
+        uses: shivammathur/setup-php@v2
+        with:
+          # 7.4 is fogproject's supported floor and the schema has to install on
+          # it. pdo_mysql is what this job is FOR -- without it the test fails
+          # closed rather than skipping, which is deliberate: a DSN was
+          # provided, so skipping would report a pass for a check that never ran.
+          php-version: '7.4'
+          extensions: pdo_mysql, gettext, openssl, json
+          coverage: none
+
+      - name: Wait for the server
+        if: steps.schema_test.outputs.present == 'true'
+        # The service health check gates the job STARTING, not the server being
+        # ready on the mapped port, and mysql:8.0 in particular keeps
+        # initialising after it first answers ping. Connecting the way the test
+        # will is the only check that means anything here.
+        run: |
+          for i in $(seq 1 30); do
+            if php -r 'new PDO("mysql:host=127.0.0.1;port=3306", "root", "");' 2>/dev/null; then
+              echo "server accepting connections after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::database service never accepted a connection"
+          exit 1
+
+      - name: Execute the schema
+        if: steps.schema_test.outputs.present == 'true'
+        continue-on-error: ${{ matrix.tolerated }}
+        env:
+          FOG_TEST_DSN: mysql:host=127.0.0.1;port=3306
+          FOG_TEST_USER: root
+          FOG_TEST_PASS: ""
+        run: php tests/schema-executes.test.php 2>&1 | tee "$RUNNER_TEMP/schema.txt"
+
+      - name: Summarise
+        if: always() && steps.schema_test.outputs.present == 'true'
+        run: |
+          {
+            echo "### schema on ${{ matrix.server }}"
+            echo ''
+            echo '```'
+            cat "$RUNNER_TEMP/schema.txt" 2>/dev/null || echo 'no output'
+            echo '```'
+            if [ "${{ matrix.tolerated }}" = "true" ]; then
+              echo ''
+              echo '> Non-blocking. A collation failure on this leg is fogproject GH-1152,'
+              echo '> an open decision rather than a regression.'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,54 @@
+name: Branch install test
+
+# Installs a NAMED fogproject branch on one distro, and fails if it does not
+# install. For validating a branch before it is merged -- which nothing could do
+# before, because reusable_distro_workflow.yml cloned a hardcoded `dev-branch`
+# and working-1.6 had therefore never been install-tested by CI at all.
+# fogproject GH-1220.
+#
+# WHY ONE DISTRO, AND WHY THIS IS NOT run_all_distros.yml WITH AN INPUT
+#
+# run_all_distros.yml aggregates as "at least one distro passed -> success".
+# That is a deliberate tolerance for GitHub Actions flakiness on the monthly
+# release gate, and it stays exactly as it is -- it is not a bug to be fixed
+# here or anywhere else.
+#
+# But that rule is wrong for a merge test: with it, a branch that breaks the
+# install on three distros out of four still reports green. Adding a branch
+# input to that workflow would have forced a choice between weakening the
+# release gate and having a merge test that cannot fail. A separate
+# single-distro flow avoids the choice entirely -- with one distro there is no
+# aggregation at all, the job's own conclusion IS the answer, and the release
+# path is untouched.
+#
+# AlmaLinux 10 because that is the one worth blocking a merge on. The others
+# remain available for a manual dispatch through their own workflows, which now
+# take a branch too.
+#
+# NOTE ON SCOPE: AlmaLinux 10 ships MariaDB below 11.4, so this will not surface
+# the collation split in fogproject GH-1152. That is expected and not what this
+# is for -- it answers "does this branch install", not "what does the schema
+# resolve to on server version X". The latter is the pinned-container schema job
+# in fogproject-tests.yml.
+
+on:
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: "fogproject branch to install (e.g. working-1.6)"
+        required: true
+        type: string
+  workflow_call:
+    inputs:
+      branch:
+        required: true
+        type: string
+
+jobs:
+  install:
+    name: install ${{ inputs.branch }} on AlmaLinux 10
+    uses: ./.github/workflows/reusable_distro_workflow.yml
+    with:
+      distro: "docker.io/library/almalinux:10"
+      package_man: "dnf"
+      branch: ${{ inputs.branch }}
