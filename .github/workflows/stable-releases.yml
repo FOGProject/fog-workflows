@@ -72,8 +72,30 @@ jobs:
           title: "No changes - no release"
           color: 0xffe135
 
-  run-install-tests:
+  run-unit-suite:
+    # The release gate checked that FOG INSTALLS and never that the test suite
+    # passes. tests/run-all.sh -- 43+ gates, several mutation-verified -- runs
+    # only on pull requests, so anything reaching dev-branch another way (a
+    # direct push, the sync bot, a merge whose checks were stale) shipped in a
+    # stable release without the suite ever seeing it again.
+    #
+    # Before the install tests rather than after, because it is the cheap one:
+    # minutes on a runner instead of four distrobox installs, and no reason to
+    # spend those to discover a failure this would have caught.
+    #
+    # repository is named explicitly. Called from here, a bare checkout inside
+    # fogproject-tests.yml resolves to fog-workflows, and run-all.sh over a tree
+    # with no tests/ exits 0 -- the gate would report green having tested
+    # nothing. fogproject GH-1222.
     needs: create-release-pull-request
+    if: needs.create-release-pull-request.outputs.skip_release != 'true'
+    uses: ./.github/workflows/fogproject-tests.yml
+    with:
+      repository: FOGProject/fogproject
+      branch: dev-branch
+
+  run-install-tests:
+    needs: [create-release-pull-request, run-unit-suite]
     if: needs.create-release-pull-request.outputs.skip_release != 'true'
     runs-on: ubuntu-24.04
     outputs:
@@ -167,9 +189,20 @@ jobs:
             GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
   close-pr-if-tests-fail:
-    needs: check-all-tests-completed-successfully
+    needs: [create-release-pull-request, run-unit-suite, check-all-tests-completed-successfully]
     runs-on: ubuntu-24.04
-    if: failure()
+    # Explicit result checks rather than a bare failure().
+    #
+    # run-unit-suite runs BEFORE the install tests, so when it fails everything
+    # downstream is SKIPPED rather than failed -- and a job whose needs were all
+    # skipped is itself skipped. A bare failure() would therefore leave the
+    # release PR open with nothing closing it and nothing announced, which is a
+    # worse outcome than the one this job already handles. GH-1222.
+    if: >-
+      always()
+      && needs.create-release-pull-request.outputs.skip_release != 'true'
+      && (needs.run-unit-suite.result == 'failure'
+          || needs.check-all-tests-completed-successfully.result == 'failure')
 
     steps:
       - uses: actions/create-github-app-token@v3
@@ -207,9 +240,14 @@ jobs:
         uses: sarisia/actions-status-discord@v1
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK }}
-          content: "Hey @everyone, validation tests failed. PR ${{ env.PR_NUMBER }} closed. Release ${{ needs.check-all-tests-completed-successfully.outputs.release_tag }} NOT CREATED, latest remains ${{ needs.check-all-tests-completed-successfully.outputs.previous_tag }}. Please check the logs for details."
+          # Tags come from create-release-pull-request, not from
+          # check-all-tests-completed-successfully. That job is SKIPPED when the
+          # unit suite fails first, and a skipped job has no outputs -- the
+          # message would have announced a blank version. The PR-creating job
+          # has the same two values and always ran by this point. GH-1222.
+          content: "Hey @everyone, validation failed at the ${{ needs.run-unit-suite.result == 'failure' && 'unit suite' || 'install tests' }} stage. PR ${{ env.PR_NUMBER }} closed. Release ${{ needs.create-release-pull-request.outputs.release_tag }} NOT CREATED, latest remains ${{ needs.create-release-pull-request.outputs.previous_tag }}. Please check the logs for details."
           title: Validation tests
-          status: ${{ needs.check-all-tests-completed-successfully.result }}
+          status: failure
           color: 0xff0000
 
   tag-and-release:

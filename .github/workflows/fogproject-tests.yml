@@ -26,9 +26,36 @@ name: fogproject test suite
 
 on:
   workflow_call:
+    inputs:
+      repository:
+        # BOTH inputs, and repository is the one that is easy to leave out.
+        #
+        # The checkouts below were bare `actions/checkout`, which resolves to
+        # the CALLING repository. Called from fogproject's tests.yml stub that
+        # is fogproject, which is why it has always been right. Called from
+        # stable-releases.yml -- which lives HERE -- it would check out
+        # fog-workflows and run the suite against a tree with no tests in it.
+        #
+        # That failure mode is silent: run-all.sh over an empty tests/ exits 0,
+        # so the release gate would report a green suite having tested nothing.
+        # Hence naming the repository explicitly rather than relying on the
+        # caller happening to be the right one. fogproject GH-1222.
+        required: false
+        type: string
+        default: ""
+      branch:
+        # Empty means "whatever event triggered this", which is the pull
+        # request merge ref for the stub and is exactly the existing
+        # behaviour. actions/checkout treats an empty ref as unset.
+        required: false
+        type: string
+        default: ""
 
 concurrency:
-  group: fogproject-tests-${{ github.event.pull_request.number || github.ref }}
+  # inputs.branch distinguishes release-validation runs from pull request runs.
+  # Without it a release check of dev-branch and a pull request into dev-branch
+  # would share a group and cancel-in-progress would have one kill the other.
+  group: fogproject-tests-${{ inputs.branch }}-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -45,8 +72,13 @@ jobs:
         php: ['7.4', '8.3']
 
     steps:
-      - name: Check out the pull request
+      - name: Check out the tree under test
         uses: actions/checkout@v7
+        with:
+          # Empty resolves to the calling repository and the triggering ref,
+          # so a pull request behaves exactly as before. GH-1222.
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.branch }}
 
       - name: Set up PHP ${{ matrix.php }}
         uses: shivammathur/setup-php@v2
@@ -129,8 +161,13 @@ jobs:
     # ever correct them.
 
     steps:
-      - name: Check out the pull request
+      - name: Check out the tree under test
         uses: actions/checkout@v7
+        with:
+          # Empty resolves to the calling repository and the triggering ref,
+          # so a pull request behaves exactly as before. GH-1222.
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.branch }}
 
       - name: Does this branch have a composer tree?
         id: composer_tree
@@ -301,8 +338,13 @@ jobs:
           --health-retries=12
 
     steps:
-      - name: Check out the pull request
+      - name: Check out the tree under test
         uses: actions/checkout@v7
+        with:
+          # Empty resolves to the calling repository and the triggering ref,
+          # so a pull request behaves exactly as before. GH-1222.
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.branch }}
 
       - name: Does this branch have the schema execution test?
         id: schema_test
