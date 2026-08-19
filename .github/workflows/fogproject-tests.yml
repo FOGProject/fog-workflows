@@ -302,7 +302,7 @@ jobs:
 
     steps:
       - name: Check out the pull request
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Does this branch have the schema execution test?
         id: schema_test
