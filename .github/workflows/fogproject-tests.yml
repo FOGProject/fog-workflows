@@ -232,3 +232,99 @@ jobs:
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"
+
+  pins:
+    name: release pins resolve
+    runs-on: ubuntu-latest
+
+    # fogproject GH-1030. Since GH-1029 the bundled plugins and the iPXE
+    # binaries are fetched from pinned releases rather than committed, and
+    # nothing checked that a pin points at anything real. A typo, or bumping
+    # the pin before cutting the release, produces a tree that lints, commits
+    # and merges cleanly and then fails at install time -- on the person
+    # installing rather than the person who made the mistake.
+    #
+    # A tag existing is NOT enough. Release assets are uploaded separately
+    # from the tag, so a tag with no assets fails the install in exactly the
+    # same way; the check has to look at the asset names.
+
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@v7
+
+      - name: Resolve every pin this branch actually has
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -uo pipefail
+          sys=packages/web/lib/fog/system.class.php
+          if [ ! -f "$sys" ]; then
+            echo "No $sys on this branch; nothing to check."
+            exit 0
+          fi
+
+          # Same awk the installer uses (lib/common/config.sh), so the check
+          # and the fetcher cannot disagree about what the pin says. Read
+          # rather than reused as a script because config.sh expects to be
+          # sourced from bin/ with the whole installer environment around it.
+          pin() {
+            awk -F\' /"define\('$1'[,](.*)"/'{print $4}' "$sys" 2>/dev/null \
+              | tr -d '[[:space:]]'
+          }
+
+          # Every pin is optional, and which ones exist is read from the tree
+          # rather than from the branch name -- this workflow is shared by
+          # every fogproject branch, and dev-branch and stable carry only the
+          # iPXE pin. Deciding from the branch name means a new branch is
+          # silently unchecked. (Same reasoning as the vendor job above.)
+          ipxe=$(pin FOG_IPXE_VERSION)
+          plugins=$(pin FOG_PLUGINS_VERSION)
+
+          # The Secure Boot tarball is a separate asset and not every branch
+          # fetches it, so ask the installer on THIS branch whether it does
+          # instead of assuming. Missing it is a real failure where it is
+          # fetched and a false one where it is not.
+          sb=no
+          grep -q 'fog-ipxe-secureboot-' lib/common/functions.sh 2>/dev/null && sb=yes
+
+          rc=0
+          # $1 repo, $2 pin name, $3 version, $4... asset basenames
+          check() {
+            local repo=$1 name=$2 ver=$3; shift 3
+            if [ -z "$ver" ]; then
+              echo "· $name is not set on this branch, skipping"
+              return 0
+            fi
+            echo "· $name = $ver  ($repo)"
+            local assets
+            if ! assets=$(gh api "repos/$repo/releases/tags/$ver" \
+                            --jq '.assets[].name' 2>/dev/null); then
+              echo "::error::$name is set to '$ver' but FOGProject/${repo#*/} has no such release. The installer will fail with 'Could not download ... from https://github.com/$repo'."
+              rc=1
+              return 0
+            fi
+            local want
+            for want in "$@"; do
+              for suffix in '' '.sha256'; do
+                if ! printf '%s\n' "$assets" | grep -qxF "${want}${suffix}"; then
+                  echo "::error::$name release '$ver' exists but is missing the asset '${want}${suffix}' that the installer fetches. A release whose assets were never uploaded fails the install exactly like a missing tag."
+                  rc=1
+                fi
+              done
+            done
+            printf '%s\n' "$assets" | sed 's/^/    have: /'
+          }
+
+          check FOGProject/fog-plugins FOG_PLUGINS_VERSION "$plugins" \
+            "fog-plugins-${plugins}.tar.gz"
+
+          ipxe_assets=("fog-ipxe-${ipxe}.tar.gz")
+          [ "$sb" = yes ] && ipxe_assets+=("fog-ipxe-secureboot-${ipxe}.tar.gz")
+          check FOGProject/fog-ipxe FOG_IPXE_VERSION "$ipxe" "${ipxe_assets[@]}"
+
+          if [ "$rc" -ne 0 ]; then
+            echo
+            echo "A pin names a release that does not exist or is missing an asset."
+            echo "Cut the release (and upload its assets) before bumping the pin here."
+          fi
+          exit "$rc"
