@@ -143,6 +143,11 @@ jobs:
         # closed ("Is this a git checkout?") if it returns nothing, so the
         # checkout has to stay a real repository -- do not swap this for an
         # archive download.
+        # `shell: bash` and not the default, which is `bash -e {0}` with NO
+        # pipefail -- so the pipe into tee would discard the suite's exit
+        # status and pass whatever it returned. See the schema job for what
+        # that actually cost.
+        shell: bash
         run: sh tests/run-all.sh | tee "$RUNNER_TEMP/suite.txt"
 
       - name: Summarise
@@ -296,6 +301,18 @@ jobs:
     # be caught by the person introducing it: on the generating server every one
     # of these statements is valid." Only an older server ever sees it. This is
     # how an older server gets to see it. fogproject GH-1221.
+    # EVERY leg is `tolerated` right now, and that is a temporary state with a
+    # ticket, not a design. Turning on pipefail below made this job report what
+    # the test was already saying: 12 of 278 statements fail on the fresh-install
+    # replay path, identically on 10.5, 11.8 and MySQL 8.0 -- historical ALTERs
+    # replayed against a database that no longer matches the state they were
+    # written for. That is fogproject GH-1241, it predates this job, and it is
+    # not something to redden every pull request over while it is unfixed.
+    #
+    # The alternative -- leave the swallow in place so the job stays green -- is
+    # how it went unnoticed in the first place. Reporting honestly and not
+    # blocking is the better half of that trade, and the tolerance comes off
+    # with GH-1241, not on somebody's judgement of the day.
     strategy:
       fail-fast: false
       matrix:
@@ -305,26 +322,29 @@ jobs:
           # the CHARSET=utf8mb3 probe GH-1152 flags as unverified inference.
           - server: mariadb:10.5
             image: mariadb:10.5
-            tolerated: false
-          # First version on the far side of the collation boundary: 11.4 made
-          # utf8mb3_uca1400_ai_ci the default for the Unicode charsets.
+            tolerated: true
+          # The far side of the collation boundary. This leg was pinned at
+          # 11.4 on the strength of fogproject GH-1152's opening claim that
+          # "MariaDB >= 11.4" resolves a bare CHARSET=utf8 to
+          # utf8mb3_uca1400_ai_ci. Measured, it does not -- 11.4 behaves
+          # exactly like 10.5, and the change lands between 11.4 and 11.8:
           #
-          # continue-on-error because the collation assertion is EXPECTED to
-          # fail here until fogproject GH-1152 is decided -- that failure is the
-          # evidence GH-1152 says it is missing, and this is how it gets
-          # measured rather than argued. Reddening every pull request over an
-          # undecided question teaches people to ignore red checks, which is the
-          # same reasoning already written into the composer_tree probe above.
+          #     MariaDB 10.5.29   utf8_general_ci
+          #     MariaDB 11.4.12   utf8mb3_general_ci
+          #     MariaDB 11.8.8    utf8mb3_uca1400_ai_ci   <- boundary
+          #     MariaDB 12.3.2    utf8mb3_uca1400_ai_ci
           #
-          # REMOVE THIS the moment GH-1152 lands. It is not a standing excuse.
-          - server: mariadb:11.4 (GH-1152, non-blocking)
-            image: mariadb:11.4
+          # So this leg was a duplicate of the 10.5 one and could never have
+          # exercised the thing it was added for. 11.8 can. (fogproject
+          # scripts/background_scripts/probe_schema_collation_matrix.sh.)
+          - server: mariadb:11.8
+            image: mariadb:11.8
             tolerated: true
           # MySQL has never had the UCA-14.0.0 collations at all, so it catches
           # the same class of failure from the other vendor.
           - server: mysql:8.0
             image: mysql:8.0
-            tolerated: false
+            tolerated: true
 
     services:
       db:
@@ -407,6 +427,14 @@ jobs:
           FOG_TEST_DSN: mysql:host=127.0.0.1;port=3306
           FOG_TEST_USER: root
           FOG_TEST_PASS: ""
+        # `shell: bash` for pipefail. Without it this step's default shell is
+        # `bash -e {0}`, the pipe into tee swallows php's exit status, and the
+        # job reports pass whatever the test said. It did: every schema leg has
+        # been green since this job was added while the test was in fact
+        # failing 12 of 278 statements on EVERY server. That is the same
+        # silent-success this job exists to catch, reproduced in the job
+        # itself. fogproject GH-1241.
+        shell: bash
         run: php tests/schema-executes.test.php 2>&1 | tee "$RUNNER_TEMP/schema.txt"
 
       - name: Summarise
