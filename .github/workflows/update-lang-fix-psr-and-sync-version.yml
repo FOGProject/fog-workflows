@@ -360,7 +360,43 @@ jobs:
           git config user.name "${BOT_SLUG}[bot]"
           git config user.email "${BOT_SLUG}[bot]@users.noreply.github.com"
           git commit -m "$message"
-          git push origin "HEAD:${{ matrix.branch }}"
+
+          # A non-fast-forward here is not this job failing. It means a PR was
+          # merged into this branch during the ~50 seconds spent checking out,
+          # installing tooling and regenerating. Measured on the run that took
+          # the merge stub down: checkout at 14:11:43, push at 14:12:32, and an
+          # unrelated PR merged at 14:12:05. Three of fifteen runs died this
+          # way, each within a minute of another run.
+          #
+          # The fogproject stub's concurrency group already serialises sync
+          # runs against each other. Nothing can serialise this against a human
+          # pressing Merge -- and cross-repo concurrency does not exist anyway,
+          # since groups are per-repository, so that stub and this repo's cron
+          # could never share one regardless.
+          #
+          # Skipped rather than rebased-and-retried, deliberately. FOG_VERSION
+          # is derived from commit count since master, so the instant the
+          # remote gains a commit the version computed above is stale -- a
+          # rebase would push a number that is already wrong. The next merge
+          # sync, or the daily cron, recomputes from scratch. It is the same
+          # trade the fogproject stub already documents for fork PRs: better a
+          # gap the schedule already covers than a red X.
+          #
+          # `if !` keeps the failure out of set -e's hands. HEAD~1 is the commit
+          # this job checked out, because the commit above is the only one it
+          # makes; if origin/<branch> is no longer that, the branch moved.
+          # fogproject GH-1219.
+          if ! git push origin "HEAD:${{ matrix.branch }}"; then
+            git fetch origin "${{ matrix.branch }}"
+            if [ "$(git rev-parse HEAD~1)" != "$(git rev-parse "origin/${{ matrix.branch }}")" ]; then
+              echo "raced=true" >> "$GITHUB_OUTPUT"
+              echo "::warning::${{ matrix.branch }} moved during this sync, so nothing was pushed. The next merge sync or the daily cron will recompute."
+              exit 0
+            fi
+            # The remote is where we left it, so the push failed for some other
+            # reason and that is a real failure.
+            exit 1
+          fi
 
       - uses: actions/create-github-app-token@v3
         id: badge-token
@@ -418,6 +454,15 @@ jobs:
             fi
             if [ "${{ steps.compute.outputs.drifted }}" != "true" ]; then
               echo "✅ Version already correct - \`${{ steps.compute.outputs.version }}\` (channel: ${{ steps.compute.outputs.channel }})"
+            elif [ "${{ steps.commit.outputs.raced }}" = "true" ]; then
+              # Before the version line, not after it. This branch keys on the
+              # PUSH; the one below keys on steps.version.outcome, which is the
+              # "Apply version fix" step and succeeds whether or not anything
+              # reached the remote. Without this the summary would report
+              # "Version fixed" for a version that was skipped, and the
+              # steps.commit.outcome check further down would stay quiet
+              # because that step now exits 0 on the race. fogproject GH-1219.
+              echo "⏭️ Version drift detected, but another merge landed on \`${{ matrix.branch }}\` mid-run so nothing was pushed. The next merge sync or the daily cron will recompute."
             elif [ "${{ steps.version.outcome }}" = "success" ]; then
               echo "🔧 **Version fixed** - \`${{ steps.version.outputs.old_version }}\` → \`${{ steps.compute.outputs.version }}\` (channel: ${{ steps.compute.outputs.channel }})"
             else
