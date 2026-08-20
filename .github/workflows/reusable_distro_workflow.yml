@@ -12,6 +12,18 @@ on:
       additional_packages:
         required: false
         type: string
+      branch:
+        # Defaulted rather than required, and defaulted to dev-branch
+        # specifically, so the release path is unchanged byte-for-byte:
+        # stable-releases.yml -> run_all_distros.yml -> distro_*.yml -> here
+        # releases by merging dev-branch into stable, so dev-branch is exactly
+        # what that path should install. The literal this replaces was correct
+        # for that caller and wrong for every other one -- working-1.6 has
+        # never been install-tested by CI because of it.
+        # fogproject GH-1220.
+        required: false
+        type: string
+        default: "dev-branch"
 
 defaults:
   run:
@@ -129,7 +141,7 @@ jobs:
             --absolutely-disable-root-password-i-am-really-positively-sure
 
       - name: Clone FOG
-        run: distrobox enter --root $CONTAINER_NAME -- git clone -b dev-branch https://github.com/FOGProject/fogproject.git
+        run: distrobox enter --root $CONTAINER_NAME -- git clone -b ${{ inputs.branch }} https://github.com/FOGProject/fogproject.git
       
       - name: Install FOG
         run: distrobox enter --root $CONTAINER_NAME -- bash -c 'sudo ./fogproject/bin/installfog.sh -y'

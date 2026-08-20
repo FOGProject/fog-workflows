@@ -1,8 +1,24 @@
 name: Debian 13
 
+# The `branch` pass-through exists so one distro can be install-tested against
+# a branch by hand, without going through run_all_distros.yml. Defaulted to
+# dev-branch, so a call that says nothing behaves exactly as it did before.
+# fogproject GH-1220.
+
 on:
-  workflow_call: 
+  workflow_call:
+    inputs:
+      branch:
+        required: false
+        type: string
+        default: "dev-branch"
   workflow_dispatch:
+    inputs:
+      branch:
+        description: "fogproject branch to install"
+        required: false
+        type: string
+        default: "dev-branch"
 
 jobs:
   debian-13:
@@ -10,3 +26,4 @@ jobs:
     with:
       distro: "docker.io/library/debian:13-slim"
       package_man: "apt"
+      branch: ${{ inputs.branch || 'dev-branch' }}
