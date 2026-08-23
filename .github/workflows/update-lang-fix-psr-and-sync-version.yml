@@ -334,69 +334,169 @@ jobs:
         id: commit
         env:
           BOT_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          BRANCH: ${{ matrix.branch }}
+          REGEN_CHANGED: ${{ steps.regen.outputs.changed }}
+          COMPUTED_VERSION: ${{ steps.compute.outputs.version }}
+          COMPUTED_CHANNEL: ${{ steps.compute.outputs.channel }}
+          OLD_VERSION: ${{ steps.version.outputs.old_version }}
+          LANG_SKIPPED: ${{ steps.lang.outputs.skipped }}
+          # php-cs-fixer refuses to run as a non-interactive "risky" job
+          # otherwise. Needed here as well as in the step above because the
+          # retry path below re-runs it.
+          PHP_CS_FIXER_IGNORE_ENV: "1"
+          # Three total attempts, not unbounded. Each retry is a full rebuild
+          # (see redo_work), so a branch being merged into faster than this job
+          # can regenerate is a signal to stand down and let the cron sweep have
+          # it, not to spin.
+          MAX_ATTEMPTS: "3"
         run: |
           set -e
-          if git diff --cached --quiet; then
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-            echo "Nothing to do on ${{ matrix.branch }}."
-            exit 0
-          fi
-          echo "changed=true" >> "$GITHUB_OUTPUT"
-
-          version_changed=false
-          if [ -n "${{ steps.version.outputs.old_version }}" ] && \
-             [ "${{ steps.version.outputs.old_version }}" != "${{ steps.compute.outputs.version }}" ]; then
-            version_changed=true
-          fi
-
-          if [ "${{ steps.regen.outputs.changed }}" = "true" ] && [ "$version_changed" = "true" ]; then
-            message="Generated Files & Version Sync: regenerate translations/PSR2 formatting and bump version from ${{ steps.version.outputs.old_version }} to ${{ steps.compute.outputs.version }} (${{ steps.compute.outputs.channel }}) on ${{ matrix.branch }}"
-          elif [ "$version_changed" = "true" ]; then
-            message="Version Sync: Increment version from ${{ steps.version.outputs.old_version }} to ${{ steps.compute.outputs.version }} for ${{ steps.compute.outputs.channel }} channel on ${{ matrix.branch }} to match commit count since master"
-          else
-            message="Generated Files Sync: regenerate translations and PSR2 formatting on ${{ matrix.branch }}"
-          fi
+          system_file="packages/web/lib/fog/system.class.php"
 
           git config user.name "${BOT_SLUG}[bot]"
           git config user.email "${BOT_SLUG}[bot]@users.noreply.github.com"
-          git commit -m "$message"
 
-          # A non-fast-forward here is not this job failing. It means a PR was
-          # merged into this branch during the ~50 seconds spent checking out,
-          # installing tooling and regenerating. Measured on the run that took
-          # the merge stub down: checkout at 14:11:43, push at 14:12:32, and an
-          # unrelated PR merged at 14:12:05. Three of fifteen runs died this
-          # way, each within a minute of another run.
+          # Rebuilds the entire answer from scratch against the branch as it now
+          # stands on the remote. This is what makes a retry safe AND correct,
+          # and it is the reason the push below retries rather than skipping.
           #
-          # The fogproject stub's concurrency group already serialises sync
-          # runs against each other. Nothing can serialise this against a human
-          # pressing Merge -- and cross-repo concurrency does not exist anyway,
-          # since groups are per-repository, so that stub and this repo's cron
-          # could never share one regardless.
+          # WHY HARD RESET, NOT REBASE OR SOFT RESET
           #
-          # Skipped rather than rebased-and-retried, deliberately. FOG_VERSION
-          # is derived from commit count since master, so the instant the
-          # remote gains a commit the version computed above is stale -- a
-          # rebase would push a number that is already wrong. The next merge
-          # sync, or the daily cron, recomputes from scratch. It is the same
-          # trade the fogproject stub already documents for fork PRs: better a
-          # gap the schedule already covers than a red X.
+          # The commit this job makes is a snapshot: the staging step runs
+          # `git add -A`, so it covers every file in the tree as it looked on
+          # the OLD base. Re-parenting that snapshot onto the merge that just
+          # landed -- by soft reset, or by rebasing and taking our side of the
+          # conflict -- would REVERT that merge's changes to every file the
+          # snapshot happens to contain. That is silent data loss dressed up as
+          # a retry, and it is why the original code chose to skip instead.
           #
-          # `if !` keeps the failure out of set -e's hands. HEAD~1 is the commit
-          # this job checked out, because the commit above is the only one it
-          # makes; if origin/<branch> is no longer that, the branch moved.
-          # fogproject GH-1219.
-          if ! git push origin "HEAD:${{ matrix.branch }}"; then
-            git fetch origin "${{ matrix.branch }}"
-            if [ "$(git rev-parse HEAD~1)" != "$(git rev-parse "origin/${{ matrix.branch }}")" ]; then
-              echo "raced=true" >> "$GITHUB_OUTPUT"
-              echo "::warning::${{ matrix.branch }} moved during this sync, so nothing was pushed. The next merge sync or the daily cron will recompute."
+          # Discarding the work and redoing it removes the whole class of
+          # problem: regeneration is deterministic given a tree, so running it
+          # again on the new tree produces the right answer with nothing carried
+          # over. The version is recomputed too -- it is a pure function of
+          # branch state, so the number that was stale the moment the remote
+          # moved is simply computed again against where the remote is now.
+          # That distinction is the point of the fix: rebase-and-retry pushes a
+          # number that is already wrong, recompute-and-retry does not.
+          redo_work() {
+              git reset --hard "origin/$BRANCH"
+
+              # Same guard as the "Regenerate translation template" step: an
+              # rc-*/feature-* branch cut before update-language.sh landed does
+              # not have it. That step already warned; stay silent here.
+              if [ "$LANG_SKIPPED" != "true" ]; then
+                  sh .githooks/lib/update-language.sh "$PWD"
+              fi
+              php-cs-fixer fix packages/web --rules=@PSR2 --quiet
+
+              git add -A
+              if git diff --cached --quiet; then
+                  REGEN_CHANGED=false
+              else
+                  REGEN_CHANGED=true
+              fi
+
+              local_flag=0
+              [ "$REGEN_CHANGED" = "true" ] && local_flag=1
+              computed=$(sh .githooks/lib/fog-version.sh "$BRANCH" "$local_flag")
+              COMPUTED_VERSION=$(printf '%s\n' "$computed" | sed -n '1p')
+              COMPUTED_CHANNEL=$(printf '%s\n' "$computed" | sed -n '2p')
+              drifted=$(printf '%s\n' "$computed" | sed -n '3p')
+
+              # Cleared, not carried. The winning merge may have brought the
+              # branch to the correct version by itself, in which case there is
+              # no version change to report and the message must not claim one.
+              OLD_VERSION=""
+              if [ "$drifted" = "true" ]; then
+                  OLD_VERSION=$(grep "define('FOG_VERSION'" "$system_file" | sed "s/.*FOG_VERSION', '\([^']*\)');/\1/")
+                  sh .githooks/lib/apply-fog-version.sh "$COMPUTED_VERSION" "$COMPUTED_CHANNEL"
+                  git add "$system_file"
+              fi
+          }
+
+          # A function rather than inline, because the retry path needs the same
+          # message built from recomputed values.
+          build_message() {
+              version_changed=false
+              if [ -n "$OLD_VERSION" ] && [ "$OLD_VERSION" != "$COMPUTED_VERSION" ]; then
+                  version_changed=true
+              fi
+
+              if [ "$REGEN_CHANGED" = "true" ] && [ "$version_changed" = "true" ]; then
+                  printf '%s' "Generated Files & Version Sync: regenerate translations/PSR2 formatting and bump version from $OLD_VERSION to $COMPUTED_VERSION ($COMPUTED_CHANNEL) on $BRANCH"
+              elif [ "$version_changed" = "true" ]; then
+                  printf '%s' "Version Sync: Increment version from $OLD_VERSION to $COMPUTED_VERSION for $COMPUTED_CHANNEL channel on $BRANCH to match commit count since master"
+              else
+                  printf '%s' "Generated Files Sync: regenerate translations and PSR2 formatting on $BRANCH"
+              fi
+          }
+
+          attempt=1
+          while :; do
+            # Checked at the top of every pass, not just the first: a retry that
+            # rebuilds onto a branch somebody else already corrected finds
+            # nothing staged, and that is success, not a failure to push.
+            if git diff --cached --quiet; then
+              echo "changed=false" >> "$GITHUB_OUTPUT"
+              echo "attempts=$attempt" >> "$GITHUB_OUTPUT"
+              echo "Nothing to do on $BRANCH (attempt $attempt)."
               exit 0
             fi
-            # The remote is where we left it, so the push failed for some other
-            # reason and that is a real failure.
-            exit 1
-          fi
+
+            git commit -q -m "$(build_message)"
+
+            if git push origin "HEAD:$BRANCH"; then
+              echo "changed=true" >> "$GITHUB_OUTPUT"
+              echo "attempts=$attempt" >> "$GITHUB_OUTPUT"
+              # The badge and the summary both read the version back out. After
+              # a retry the compute step's outputs are stale by exactly the
+              # thing this loop exists to fix, so publish what actually landed
+              # and let those consumers prefer it.
+              echo "final_version=$COMPUTED_VERSION" >> "$GITHUB_OUTPUT"
+              echo "final_channel=$COMPUTED_CHANNEL" >> "$GITHUB_OUTPUT"
+              echo "final_old_version=$OLD_VERSION" >> "$GITHUB_OUTPUT"
+              [ "$attempt" -gt 1 ] && echo "::notice::Pushed to $BRANCH on attempt $attempt after recomputing against a moved branch."
+              exit 0
+            fi
+
+            # A non-fast-forward here is not this job failing. It means a PR was
+            # merged into this branch during the ~50 seconds spent checking out,
+            # installing tooling and regenerating. Measured on the run that took
+            # the merge stub down: checkout at 14:11:43, push at 14:12:32, and an
+            # unrelated PR merged at 14:12:05. Three of fifteen runs died this
+            # way, each within a minute of another run.
+            #
+            # The fogproject stub's concurrency group already serialises sync
+            # runs against each other. Nothing can serialise this against a human
+            # pressing Merge -- and cross-repo concurrency does not exist anyway,
+            # since groups are per-repository, so that stub and this repo's cron
+            # could never share one regardless.
+            #
+            # HEAD~1 is the commit this pass started from, because the commit
+            # above is the only one it makes; if origin/<branch> is no longer
+            # that, the branch moved and this is the race. fogproject GH-1219.
+            git fetch origin "$BRANCH"
+            if [ "$(git rev-parse HEAD~1)" = "$(git rev-parse "origin/$BRANCH")" ]; then
+              # The remote is where we left it, so the push failed for some other
+              # reason and that is a real failure.
+              exit 1
+            fi
+
+            attempt=$((attempt + 1))
+            if [ "$attempt" -gt "$MAX_ATTEMPTS" ]; then
+              # Still a gap, just a much smaller one, and still not a red X --
+              # the daily cron is the backstop it always was. Same trade the
+              # fogproject stub documents for fork PRs: better a gap the
+              # schedule already covers than a failed check on every merge.
+              echo "raced=true" >> "$GITHUB_OUTPUT"
+              echo "attempts=$MAX_ATTEMPTS" >> "$GITHUB_OUTPUT"
+              echo "::warning::$BRANCH moved during each of $MAX_ATTEMPTS attempts, so nothing was pushed. The next merge sync or the daily cron will recompute."
+              exit 0
+            fi
+
+            echo "$BRANCH moved during attempt $((attempt - 1)); rebuilding against the new tip."
+            redo_work
+          done
 
       - uses: actions/create-github-app-token@v3
         id: badge-token
@@ -411,7 +511,14 @@ jobs:
           repositories: "fog-workflows"
 
       - name: Update version badge
-        if: contains(fromJson('["dev-branch", "working-1.6"]'), matrix.branch)
+        # Also gated on the push having happened. The badge is a claim about
+        # what the branch carries, and when the loop above gives up it carries
+        # the OLD version -- publishing the computed one would advertise a
+        # version that is not there. Predates the retry loop; the loop just
+        # made it easy to see.
+        if: >-
+          contains(fromJson('["dev-branch", "working-1.6"]'), matrix.branch)
+          && steps.commit.outputs.raced != 'true'
         env:
           # Was github.token, which works only while this workflow runs in
           # fog-workflows. Under workflow_call github.token is the CALLER's
@@ -426,7 +533,7 @@ jobs:
           path="badges/${{ matrix.branch }}.json"
           body=$(jq -n \
             --arg label "${{ matrix.branch }}" \
-            --arg message "${{ steps.compute.outputs.version }}" \
+            --arg message "${{ steps.commit.outputs.final_version || steps.compute.outputs.version }}" \
             '{schemaVersion: 1, label: $label, message: $message, color: "blue", cacheSeconds: 3600}')
           content=$(printf '%s' "$body" | base64 -w0)
 
@@ -454,6 +561,12 @@ jobs:
             fi
             if [ "${{ steps.compute.outputs.drifted }}" != "true" ]; then
               echo "✅ Version already correct - \`${{ steps.compute.outputs.version }}\` (channel: ${{ steps.compute.outputs.channel }})"
+            elif [ "${{ steps.commit.outputs.changed }}" = "false" ]; then
+              # A retry that rebuilt onto a branch somebody else had already
+              # corrected finds nothing to stage. Reported separately from
+              # "already correct" above, which is about the state this job
+              # found, not the state it left.
+              echo "✅ Version already correct on \`${{ matrix.branch }}\` by the time this run rebuilt against it."
             elif [ "${{ steps.commit.outputs.raced }}" = "true" ]; then
               # Before the version line, not after it. This branch keys on the
               # PUSH; the one below keys on steps.version.outcome, which is the
@@ -462,9 +575,13 @@ jobs:
               # "Version fixed" for a version that was skipped, and the
               # steps.commit.outcome check further down would stay quiet
               # because that step now exits 0 on the race. fogproject GH-1219.
-              echo "⏭️ Version drift detected, but another merge landed on \`${{ matrix.branch }}\` mid-run so nothing was pushed. The next merge sync or the daily cron will recompute."
+              echo "⏭️ Version drift detected, but \`${{ matrix.branch }}\` moved again on every one of ${{ steps.commit.outputs.attempts }} attempts, so nothing was pushed. The next merge sync or the daily cron will recompute."
             elif [ "${{ steps.version.outcome }}" = "success" ]; then
-              echo "🔧 **Version fixed** - \`${{ steps.version.outputs.old_version }}\` → \`${{ steps.compute.outputs.version }}\` (channel: ${{ steps.compute.outputs.channel }})"
+              echo "🔧 **Version fixed** - \`${{ steps.commit.outputs.final_old_version || steps.version.outputs.old_version }}\` → \`${{ steps.commit.outputs.final_version || steps.compute.outputs.version }}\` (channel: ${{ steps.commit.outputs.final_channel || steps.compute.outputs.channel }})"
+              if [ "${{ steps.commit.outputs.attempts }}" != "1" ] && [ -n "${{ steps.commit.outputs.attempts }}" ]; then
+                echo ""
+                echo "🔁 \`${{ matrix.branch }}\` moved mid-run; the value above was recomputed and pushed on attempt ${{ steps.commit.outputs.attempts }}."
+              fi
             else
               echo "⚠️ Version drift detected but the fix did not complete - check the job log."
             fi
