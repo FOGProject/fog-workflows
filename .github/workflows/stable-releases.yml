@@ -11,6 +11,22 @@ jobs:
     uses: ./.github/workflows/update-lang-fix-psr-and-sync-version.yml
     with:
       branch: "dev-branch"
+      # Explicit, though false is already the default, because THIS is the path
+      # where getting it wrong ships to users.
+      #
+      # fogproject's merge stub now passes version_only: true -- its formatting
+      # and catalogue are corrected on each pull request before it merges, so
+      # repeating them per-merge is a guaranteed no-op. None of that reasoning
+      # holds here. This job is the last whole-tree pass before dev-branch is
+      # promoted to stable and tagged, and it has to cover the things PR-time
+      # regeneration cannot: anything merged from a fork, anything pushed
+      # directly to dev-branch, and every commit that predates PR-time
+      # regeneration existing at all.
+      #
+      # So this runs the full sweep -- gettext regeneration and php-cs-fixer
+      # over the whole of packages/web, not just changed files. Do not "align"
+      # it with the merge stub.
+      version_only: false
     secrets: inherit
   
   create-release-pull-request:

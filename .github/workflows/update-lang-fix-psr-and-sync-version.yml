@@ -16,11 +16,22 @@ name: Update Language Files, Fix PSR2, and Sync FOG Version
 #   - merged FORK pull requests get no secrets, so no PR-time regeneration;
 #   - rc-*/feature-* branches are off the merge path entirely.
 #
-# All three still land here. What did change is the MERGE path: fogproject's
-# sync-generated-files.yml now calls this with version_only, because by the
-# time a same-repo PR merges its formatting and catalogue are already correct,
-# and redoing them at merge time can only ever be a no-op that still costs a
-# plugin fetch and a full gettext regeneration.
+# All three still land here. What did change is the MERGE path, and ONLY that
+# path: fogproject's sync-generated-files.yml now calls this with version_only,
+# because by the time a same-repo PR merges its formatting and catalogue are
+# already correct, and redoing them at merge time can only ever be a no-op that
+# still costs a plugin fetch and a full gettext regeneration.
+#
+# The two paths that still run the FULL whole-tree sweep, and must keep doing so:
+#
+#   * the daily schedule -- the only cover for the three cases above;
+#   * stable-releases.yml's pre-release sync of dev-branch, which is the last
+#     whole-tree pass before a tagged release. It passes version_only: false
+#     explicitly rather than relying on the default, because that is the one
+#     call site where getting this wrong ships to users.
+#
+# Note the default is false, so an existing caller that says nothing keeps the
+# full behaviour. version_only is opt-in, deliberately.
 #
 # WHY THESE THREE ARE ONE WORKFLOW
 #
