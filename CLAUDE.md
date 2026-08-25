@@ -129,6 +129,18 @@ don't "simplify" those back to the default `GITHUB_TOKEN` just because the call 
   triggers for inactivity (GitHub auto-disables scheduled workflows after 60 days with no repo
   activity). Uses `PhrozenByte/gh-workflow-immortality` against this repo.
 
+- **`fogproject-pr-regen.yml`** — regenerates fogproject's derived files *on a pull request*
+  rather than on the base branch after it merges. `workflow_call` only, invoked by a `regen`
+  job in fogproject's `.github/workflows/tests.yml` that `needs:` the test suite — a caller
+  job that `uses:` a reusable workflow succeeds only if every job in the called workflow did,
+  so that `needs:` is already "all current tests passed" and no aggregate gate job is needed
+  inside `fogproject-tests.yml`. Runs `php-cs-fixer --rules=@PSR2` over **only the files the
+  PR touches** (mirroring `.githooks/pre-commit`'s `psrfix()`, not the sweep's whole-tree
+  pass, so a contributor's diff never absorbs unrelated pre-existing violations) plus
+  `update-language.sh`, then commits once to the PR head with an App token. Deliberately kept
+  out of `fogproject-tests.yml` so that file's "writes nothing" invariant stays checkable with
+  a grep. See the exception note under *Conventions* below before changing its trigger model.
+
 - **`reusable_distro_workflow.yml`** — the actual FOG install-test logic for one distro,
   invoked via `workflow_call` by every `distro_*.yml` wrapper below. It:
   1. Ensures `crun` is >= 1.14.3 (apt on the `ubuntu-24.04` runner is often too old), upgrading
@@ -179,6 +191,18 @@ don't "simplify" those back to the default `GITHUB_TOKEN` just because the call 
   `workflow_call`/`workflow_dispatch`, and `pull_request: types: [closed]` (a merge — which the
   bot's direct push is not) are all safe for the same reason, and all three are in use. The
   test to apply to a new trigger is that one question, not whether it happens to be a cron.
+  - **There is exactly one deliberate exception**, and it is worth understanding before you
+    read the rule above and revert it: `fogproject-pr-regen.yml` pushes to a pull request's
+    head branch, and that push *does* raise `pull_request: synchronize`, which runs it again.
+    Every other workflow here is safe *structurally* — the event simply cannot be raised by
+    the bot. That argument is unavailable there, so it is replaced by three things, and an
+    exception is only acceptable when it carries all three: (1) every operation it performs
+    is idempotent, so the second run finds nothing and the sequence terminates in one step;
+    (2) a runtime assertion that re-runs the operations and **fails the job** if a second
+    pass changes anything, turning any future non-idempotency into one red check instead of
+    a runaway; and (3) a hard refusal to push when the head branch already ends in a bot
+    commit, which bounds the damage whether or not (1) holds. "It should converge" on its
+    own is not enough — the 2026-07-28 runaway would have passed that bar.
 - A reusable workflow's `permissions:` block is a **request**, and a caller granting less is a
   hard startup error — `The workflow is requesting 'contents: write', but is only allowed
   'contents: read'` — not a silent capping. No jobs run and no logs are written, so it surfaces
