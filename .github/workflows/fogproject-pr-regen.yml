@@ -1,0 +1,420 @@
+name: fogproject PR regeneration
+
+# Regenerates fogproject's derived files ON THE PULL REQUEST, before it merges,
+# instead of on the base branch afterwards.
+#
+# Called as a reusable workflow by a stub in fogproject
+# (.github/workflows/tests.yml), from a job that `needs:` the test suite. A
+# caller job that `uses:` a reusable workflow succeeds only if EVERY job in the
+# called workflow succeeded, so `needs: suite` there already means "all current
+# tests passed" -- no aggregate gate job is needed inside fogproject-tests.yml,
+# and that file keeps its read-only invariant intact.
+#
+# WHY THIS IS A SEPARATE FILE FROM fogproject-tests.yml
+#
+# That file's header states an invariant you can check with a grep: no App
+# token, no commit, no API call, therefore nothing it can do could trigger
+# another run of itself. Adding a gated write job to it would replace a
+# property a reviewer can verify in one search with "...except job five, whose
+# `if:` you have to read and believe". After the 2026-07-28 runaway, that trade
+# is not worth one file's worth of YAML reuse.
+#
+# ============================================================================
+# THIS IS THE FIRST WORKFLOW HERE WHOSE OWN PUSH RAISES THE EVENT THAT RUNS IT
+# ============================================================================
+#
+# Read this section before changing anything below it.
+#
+# Every other trigger in this repository is safe STRUCTURALLY. A cron tick
+# cannot see what was pushed. A direct push is not a PR merge, so it cannot
+# raise `pull_request: closed`. That is the argument the top of
+# update-lang-fix-psr-and-sync-version.yml makes, and it is why the sweep is
+# allowed to push at all.
+#
+# That argument is NOT available here. This job pushes a commit to the pull
+# request's head branch, and that push raises `pull_request: synchronize`,
+# which runs this workflow again. The edge is real. It is replaced by a
+# termination argument plus two runtime circuit breakers.
+#
+# TERMINATION
+#
+#   php-cs-fixer in fix mode is a fixed point: run 1 rewrites files to conform
+#   to @PSR2, run 2 over conforming files produces no diff. PHP_CS_FIXER_VERSION
+#   is pinned below and MUST match the sweep's pin -- two fixer versions
+#   disagree about the same file, and both paths format the same tree.
+#
+#   update-language.sh is deterministic given a tree. Its own header documents
+#   why: --omit-header and --no-location (no POT-Creation-Date, no line
+#   numbers) and msgcat --no-wrap --sort-output (order- and
+#   gettext-version-independent wrapping -- added after two gettext versions
+#   rewrote each other's wrapping forever). runs-on is pinned to the same
+#   ubuntu-24.04 image the sweep uses so the two produce byte-identical output
+#   and cannot fight across a merge.
+#
+# So: one contributor push -> run 1 -> at most one bot commit -> run 2 -> the
+# staging step finds nothing -> no push, no event. AT MOST ONE EXTRA RUN AND
+# EXACTLY ONE BOT COMMIT per contributor push. This is not a loop with a fixed
+# point; it is a two-step sequence.
+#
+# CIRCUIT BREAKERS (because the above is an argument, and arguments about loops
+# in this repository get audited later)
+#
+#   1. "Assert regeneration converged" re-runs both operations after staging
+#      and fails the job if a second pass changes anything. That turns any
+#      future non-idempotency from "30 commits in 20 minutes" into one red
+#      check. It is the highest-value step in this file.
+#   2. The commit step refuses to push if the head branch already ends in a bot
+#      commit and there is still work to do. That bound holds whether or not
+#      the idempotency argument is true, which is the entire point of it.
+#
+# TWO THINGS THAT LOOK LIKE SIMPLIFICATIONS AND ARE TRAPS
+#
+#   Pushing with GITHUB_TOKEN instead of the App token. A GITHUB_TOKEN push
+#   does not trigger workflows, which sounds like exactly what a loop-averse
+#   reader wants. It is a deadlock in waiting: once required status checks are
+#   on, checks attach to the head SHA, and a push that produces no run leaves
+#   the new SHA with no checks and the PR stuck on "Expected -- waiting for
+#   status" forever. The App token is both the convention here and the
+#   functional requirement; they happen to agree.
+#
+#   Adding [skip ci] to the commit message. Same deadlock, same reason.
+#
+# WHY NO RETRY LOOP, UNLIKE THE SWEEP
+#
+# The sweep needs redo_work() because nothing else would re-fire it. Here, a
+# non-fast-forward push means the contributor pushed while we ran -- and their
+# push has already raised `synchronize`, so a fresh run against the new tip is
+# guaranteed. The event model is the retry. We exit 0 with a notice.
+
+on:
+  workflow_call:
+    inputs:
+      # All optional and resolved against the pull_request event at the use
+      # site, the same idiom (and for the same reason -- workflow_call inputs
+      # cannot have expression defaults) as fogproject-tests.yml's
+      # repository/branch pair. Deliberately NOT named `branch`: this workflow
+      # needs three refs with three different roles, and reusing that name for
+      # one of them would invite passing the wrong one.
+      repository:
+        description: "owner/name holding the PR head. Defaults to the event's head repo."
+        required: false
+        type: string
+        default: ''
+      head_ref:
+        description: "Branch to regenerate and push to. Defaults to the event's head ref."
+        required: false
+        type: string
+        default: ''
+      base_ref:
+        description: "Branch the PR targets. Scopes the PSR2 pass. Defaults to the event's base ref."
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  # Per pull request, and NOT the sweep's global
+  # `fog-generated-sync-and-version` group: that one is cancel-in-progress
+  # false, so joining it would queue every PR behind every other PR and behind
+  # the daily sweep. (It could not be joined anyway -- concurrency groups are
+  # per-repository, and this workflow's group lives in fogproject's namespace
+  # when called from there.)
+  #
+  # cancel-in-progress because a superseded run computed against a tree that no
+  # longer exists; the newer run redoes it correctly.
+  group: fogproject-pr-regen-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  # Everything written below runs on a GitHub App token, so the ambient
+  # GITHUB_TOKEN never needs to be writable. Do not raise this to `write`: a
+  # reusable workflow's permissions block is a REQUEST, and a caller granting
+  # less is a hard startup error with no jobs and no logs -- which is how
+  # fogproject's merge stub failed on its first two real merges.
+  contents: read
+
+env:
+  # MUST match update-lang-fix-psr-and-sync-version.yml. If you bump one, bump
+  # the other in the same change.
+  PHP_CS_FIXER_VERSION: "3.62.0"
+
+jobs:
+  regen:
+    name: regenerate generated files
+    # Pinned, and the same image the sweep uses, for gettext version parity.
+    runs-on: ubuntu-24.04
+
+    steps:
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          client-id: ${{ vars.FOG_WORKFLOWS_APPID }}
+          private-key: ${{ secrets.FOG_WORKFLOWS_PRIVATE_KEY }}
+          owner: FOGProject
+          repositories: "fogproject"
+
+      - name: Confirm we resolved a real head branch
+        env:
+          HEAD_REF: ${{ inputs.head_ref || github.event.pull_request.head.ref }}
+          BASE_REF: ${{ inputs.base_ref || github.event.pull_request.base.ref }}
+        run: |
+          set -e
+          # Fail loud rather than silently regenerating the wrong thing. This is
+          # the same lesson fogproject-tests.yml learned when it grew a
+          # `repository` input: a checkout that resolves to the wrong place
+          # produces a SILENT GREEN, which is worse than a red job.
+          if [ -z "$HEAD_REF" ] || [ -z "$BASE_REF" ]; then
+            echo "::error::Could not resolve head/base refs. This workflow needs a pull_request event, or explicit head_ref/base_ref inputs."
+            exit 1
+          fi
+          echo "head=$HEAD_REF base=$BASE_REF"
+
+      - name: Check out the pull request HEAD
+        uses: actions/checkout@v7
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          # The HEAD branch, not github.ref. For a pull_request event github.ref
+          # is refs/pull/N/merge -- a detached ref GitHub synthesises for the
+          # merge preview, which cannot be pushed to. The test suite WANTS that
+          # ref; this job is the one that has to write back, so it checks out
+          # the branch the contributor actually owns.
+          repository: ${{ inputs.repository || github.event.pull_request.head.repo.full_name }}
+          ref: ${{ inputs.head_ref || github.event.pull_request.head.ref }}
+          # Full history and tags: the PSR2 scope diffs against the merge base,
+          # and the version step this gains in phase 2 needs the commit count
+          # since master plus `git describe --tags`.
+          fetch-depth: 0
+          fetch-tags: true
+
+      - name: Install tooling
+        run: |
+          set -e
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gettext php-cli
+          curl -sSL -o /usr/local/bin/php-cs-fixer \
+            "https://github.com/PHP-CS-Fixer/PHP-CS-Fixer/releases/download/v${PHP_CS_FIXER_VERSION}/php-cs-fixer.phar"
+          chmod +x /usr/local/bin/php-cs-fixer
+          php-cs-fixer --version
+
+      - name: Fetch the plugin tree
+        run: |
+          set -e
+          # packages/web/lib/plugins is gitignored on working-1.6 (the bundled
+          # plugins are a pinned fog-plugins release since fogproject#1029), and
+          # update-language.sh refuses outright when it is empty -- because
+          # xgettext walks the filesystem, and a missing plugin tree silently
+          # drops every plugin string from the catalogue (528 msgids when the
+          # sweep first measured it). So this is required, not opportunistic.
+          #
+          # dev-branch and anything cut before #1029 carry the plugins in-tree
+          # and ship no fetcher. Those are already correct; leave them alone.
+          if [ ! -x bin/fetch-plugins.sh ]; then
+            echo "No bin/fetch-plugins.sh on this branch; plugins are in-tree here."
+            exit 0
+          fi
+          bin/fetch-plugins.sh
+          if [ -z "$(ls -A packages/web/lib/plugins 2>/dev/null)" ]; then
+            echo "::error::packages/web/lib/plugins is empty after fetching."
+            exit 1
+          fi
+
+      - name: Work out which files this pull request touches
+        id: scope
+        env:
+          BASE_REF: ${{ inputs.base_ref || github.event.pull_request.base.ref }}
+        run: |
+          set -e
+          git fetch --no-tags origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+
+          # THREE dots, via an explicit merge base: changes made ON THIS BRANCH
+          # since it diverged, not differences against the base's current tip.
+          # Two dots would list files somebody else changed on the base and
+          # attribute them to this PR.
+          base_sha=$(git merge-base "origin/$BASE_REF" HEAD)
+          echo "merge base: $base_sha"
+
+          # core.quotePath=false so non-ASCII names arrive verbatim rather than
+          # octal-escaped, matching .githooks/pre-commit. A newline in a
+          # filename would still break this; nothing in this repo has one.
+          git -c core.quotePath=false diff --name-only --diff-filter=ACMR \
+            "$base_sha...HEAD" -- 'packages/web/*.php' \
+            ':(exclude)packages/web/vendor/*' > "$RUNNER_TEMP/scope.txt"
+
+          echo "count=$(wc -l < "$RUNNER_TEMP/scope.txt")" >> "$GITHUB_OUTPUT"
+          sed 's/^/  /' "$RUNNER_TEMP/scope.txt"
+
+      - name: Apply PSR2 formatting to this pull request's files only
+        env:
+          # The phar refuses to run as a non-interactive "risky" job otherwise.
+          PHP_CS_FIXER_IGNORE_ENV: "1"
+        run: |
+          set -e
+          # SCOPE IS THE ONE PLACE THIS DELIBERATELY DIFFERS FROM THE SWEEP.
+          #
+          # The sweep formats packages/web wholesale, and says why: it is the
+          # backstop that catches whatever a machine without php-cs-fixer
+          # committed. It can do that because it owns the branch it pushes to.
+          #
+          # This push lands in somebody else's pull request. A whole-tree pass
+          # here would drag every pre-existing violation in packages/web into
+          # their diff, under their name, for them to explain in review -- the
+          # exact failure .githooks/pre-commit's psrfix() was rewritten to
+          # avoid. So this mirrors the hook's scope instead: the files the
+          # change actually touches.
+          #
+          # The vendor/ exclusion in the scope step is not cosmetic either --
+          # reformatting third-party source is what makes a dependency
+          # unupdatable, since the next composer install rewrites the files and
+          # the fixer rewrites them back.
+          if [ ! -s "$RUNNER_TEMP/scope.txt" ]; then
+            echo "No PHP files under packages/web changed in this pull request."
+            exit 0
+          fi
+          # No `|| true`: in fix mode the fixer exits 0 whether or not it
+          # changed anything, so a non-zero here is a real failure -- a parse
+          # error or a missing extension -- and swallowing it would mean
+          # pushing a half-formatted file and reporting success.
+          xargs -a "$RUNNER_TEMP/scope.txt" -d '\n' -r \
+            php-cs-fixer fix --rules=@PSR2 --quiet --
+
+      - name: Regenerate translation template
+        id: lang
+        run: |
+          set -e
+          # Whole-tree by necessity, not by choice: messages.pot is one global
+          # artifact built from a filesystem walk, and there is no per-PR subset
+          # of it. It is deterministic, so a current catalogue regenerates to a
+          # byte-identical file and stages nothing; if it IS stale this PR
+          # absorbs the correction, which is small and strictly better than the
+          # sweep doing it later under a message describing something else.
+          if [ ! -f .githooks/lib/update-language.sh ]; then
+            echo "skipped=true" >> "$GITHUB_OUTPUT"
+            echo "::warning::.githooks/lib/update-language.sh is not on this branch; skipping translation regeneration."
+            exit 0
+          fi
+          echo "skipped=false" >> "$GITHUB_OUTPUT"
+          sh .githooks/lib/update-language.sh "$PWD"
+
+      - name: Stage regenerated files
+        id: regen
+        run: |
+          set -e
+          # Narrow staging, NOT the sweep's `git add -A`. The sweep stages the
+          # whole tree because its commit is meant to be a snapshot of a branch
+          # it owns. This commit goes into someone's pull request, so it stages
+          # only what this job is allowed to touch. The fetched plugin tree is
+          # the obvious thing that must never be swept in -- on working-1.6 it
+          # is gitignored, but relying on that rather than being explicit is how
+          # the wrong file ends up in somebody's PR.
+          if [ -d packages/web/management/languages ]; then
+            git add -- packages/web/management/languages/
+          fi
+          if [ -s "$RUNNER_TEMP/scope.txt" ]; then
+            while IFS= read -r f; do
+              [ -n "$f" ] || continue
+              # A rename can leave the old path listed; skip anything absent
+              # rather than failing the job on it.
+              [ -f "$f" ] || continue
+              git add -- "$f"
+            done < "$RUNNER_TEMP/scope.txt"
+          fi
+
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            git diff --cached --stat
+          fi
+
+      - name: Assert regeneration converged
+        if: steps.regen.outputs.changed == 'true'
+        env:
+          LANG_SKIPPED: ${{ steps.lang.outputs.skipped }}
+          PHP_CS_FIXER_IGNORE_ENV: "1"
+        run: |
+          set -e
+          # THE CIRCUIT BREAKER. Run both operations a second time over the
+          # tree the first pass produced. If anything changes, the operations
+          # are not idempotent on this tree, the termination argument at the top
+          # of this file is void, and pushing would start a
+          # commit/synchronize/commit loop.
+          #
+          # Fail here instead. One red check is the correct outcome; ~30 commits
+          # in 20 minutes was the 2026-07-28 outcome.
+          if [ -s "$RUNNER_TEMP/scope.txt" ]; then
+            xargs -a "$RUNNER_TEMP/scope.txt" -d '\n' -r \
+              php-cs-fixer fix --rules=@PSR2 --quiet --
+          fi
+          if [ "$LANG_SKIPPED" != "true" ]; then
+            sh .githooks/lib/update-language.sh "$PWD"
+          fi
+
+          if ! git diff --quiet; then
+            echo "::error::Regeneration is not idempotent on this tree: a second pass changed files the first pass produced."
+            echo "::error::Pushing would start a commit/synchronize loop, so nothing was pushed."
+            echo "::error::Check php-cs-fixer and gettext versions against update-lang-fix-psr-and-sync-version.yml."
+            git diff --stat
+            exit 1
+          fi
+          echo "Second pass produced no changes; the regeneration is a fixed point."
+
+      - name: Commit and push to the pull request
+        id: commit
+        env:
+          BOT_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          HEAD_REF: ${{ inputs.head_ref || github.event.pull_request.head.ref }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          set -e
+          git config user.name "${BOT_SLUG}[bot]"
+          git config user.email "${BOT_SLUG}[bot]@users.noreply.github.com"
+
+          if git diff --cached --quiet; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            echo "Nothing to do: formatting and translations on $HEAD_REF are already current."
+            exit 0
+          fi
+
+          # Hard bound of one consecutive bot commit. Holds regardless of
+          # whether the idempotency argument at the top of this file is true,
+          # which is exactly why it is here and not merely a comment.
+          if [ "$(git log -1 --format=%an "origin/$HEAD_REF")" = "${BOT_SLUG}[bot]" ]; then
+            echo "::error::$HEAD_REF already ends in a ${BOT_SLUG}[bot] commit and this run still found work to do."
+            echo "::error::Refusing to stack a second bot commit; that is the shape of the 2026-07-28 runaway."
+            echo "::error::Investigate before re-running -- start with the diff below."
+            git diff --cached --stat
+            exit 1
+          fi
+
+          suffix=""
+          [ -n "$PR_NUMBER" ] && suffix=" (#${PR_NUMBER})"
+          git commit -q -m "Generated Files Sync: regenerate translations and PSR2 formatting${suffix}"
+
+          if git push origin "HEAD:$HEAD_REF"; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          # Not a failure -- see "WHY NO RETRY LOOP" at the top of this file.
+          echo "changed=false" >> "$GITHUB_OUTPUT"
+          echo "::notice::$HEAD_REF moved while this run was working; the run that push started will redo this."
+
+      - name: Summarize
+        if: always()
+        run: |
+          {
+            echo "## Generated file regeneration"
+            echo ""
+            if [ "${{ steps.commit.outputs.changed }}" = "true" ]; then
+              echo "🔧 Pushed one correction commit to \`${{ inputs.head_ref || github.event.pull_request.head.ref }}\` (${{ steps.scope.outputs.count }} PHP file(s) in scope)."
+              echo ""
+              echo "That push re-runs the suite once against the corrected commit. The re-run makes no further changes -- both operations are idempotent, and the \"Assert regeneration converged\" step above proved it on this tree -- so the chain stops there."
+            elif [ "${{ steps.commit.outputs.changed }}" = "false" ]; then
+              echo "✅ Nothing to correct; formatting and translations were already current."
+            else
+              echo "⚠️ Did not reach the commit step -- see the failing step above."
+            fi
+            if [ "${{ steps.lang.outputs.skipped }}" = "true" ]; then
+              echo ""
+              echo "ℹ️ Translation regeneration was skipped -- this branch predates \`.githooks/lib/update-language.sh\`. PSR2 formatting still ran."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

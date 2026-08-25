@@ -6,6 +6,33 @@ name: Update Language Files, Fix PSR2, and Sync FOG Version
 # per branch, in that order, because the third depends on the first two
 # having already landed.
 #
+# WHAT STILL COMES HERE, NOW THAT PR-TIME REGENERATION EXISTS
+#
+# fogproject-pr-regen.yml corrects translations and PSR2 formatting ON the
+# pull request, before it merges. That does not shrink this workflow's job,
+# because it only covers pull requests that can run it:
+#
+#   - direct pushes to a watched branch cover nothing;
+#   - merged FORK pull requests get no secrets, so no PR-time regeneration;
+#   - rc-*/feature-* branches are off the merge path entirely.
+#
+# All three still land here. What did change is the MERGE path, and ONLY that
+# path: fogproject's sync-generated-files.yml now calls this with version_only,
+# because by the time a same-repo PR merges its formatting and catalogue are
+# already correct, and redoing them at merge time can only ever be a no-op that
+# still costs a plugin fetch and a full gettext regeneration.
+#
+# The two paths that still run the FULL whole-tree sweep, and must keep doing so:
+#
+#   * the daily schedule -- the only cover for the three cases above;
+#   * stable-releases.yml's pre-release sync of dev-branch, which is the last
+#     whole-tree pass before a tagged release. It passes version_only: false
+#     explicitly rather than relying on the default, because that is the one
+#     call site where getting this wrong ships to users.
+#
+# Note the default is false, so an existing caller that says nothing keeps the
+# full behaviour. version_only is opt-in, deliberately.
+#
 # WHY THESE THREE ARE ONE WORKFLOW
 #
 # FOG_VERSION on dev-branch/working-1.6/feature-*/rc-* branches is derived
@@ -102,12 +129,22 @@ on:
         description: "Single fogproject branch to sync (omit to sweep all watched branches)"
         required: false
         type: string
+      version_only:
+        description: "Skip translation regeneration and PSR2 formatting; sync only FOG_VERSION/FOG_CHANNEL. Used by fogproject's merge stub now that PR-time regeneration owns the first two."
+        required: false
+        type: boolean
+        default: false
   workflow_dispatch:
     inputs:
       branch:
         description: "Single fogproject branch to sync (omit to sweep all watched branches)"
         required: false
         type: string
+      version_only:
+        description: "Skip translation regeneration and PSR2 formatting; sync only FOG_VERSION/FOG_CHANNEL. Used by fogproject's merge stub now that PR-time regeneration owns the first two."
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   group: fog-generated-sync-and-version
@@ -192,6 +229,30 @@ jobs:
       fail-fast: false
       matrix:
         branch: ${{ fromJson(needs.discover-branches.outputs.branches) }}
+
+    env:
+      # A boolean, not an `operations: all|regen|version` string. workflow_call
+      # has no `choice` type, so an enum would be an unvalidated string whose
+      # typo mode is "silently perform the wrong subset" -- and this workflow
+      # already carries one unvalidated string input (`branch`, which
+      # sync-generated-files.yml's comment notes it must constrain itself). A
+      # boolean is schema-checked for free. There is also no use for a
+      # regen-only mode: that lives in fogproject-pr-regen.yml now.
+      #
+      # `|| false` because the `inputs` context is empty on a schedule event --
+      # input defaults apply to workflow_call/workflow_dispatch only.
+      #
+      # This exists for fogproject's merge stub. Since PSR2 and the
+      # translation catalogue are now corrected on the PR branch BEFORE it
+      # merges (fogproject-pr-regen.yml, next door), redoing them at merge time
+      # can only ever be a no-op on that path -- while still costing a plugin
+      # fetch and a full gettext regeneration on every merge.
+      #
+      # They are NOT removed from this workflow, and must not be: the schedule
+      # is still the only cover for direct pushes, for merged fork PRs (which
+      # get no secrets and so no PR-time autofix), and for rc-*/feature-*
+      # branches, which are deliberately off the merge path entirely.
+      VERSION_ONLY: ${{ inputs.version_only || false }}
     steps:
       - uses: actions/create-github-app-token@v3
         id: app-token
@@ -222,6 +283,10 @@ jobs:
           php-cs-fixer --version
 
       - name: Fetch the plugin tree
+        # Only the translation regeneration needs this, so a version-only run
+        # skips the download entirely rather than fetching a release it will
+        # not read.
+        if: ${{ !fromJSON(env.VERSION_ONLY) }}
         run: |
           set -e
           # Since fogproject#1029 the bundled plugins are a pinned fog-plugins
@@ -253,6 +318,7 @@ jobs:
 
       - name: Regenerate translation template
         id: lang
+        if: ${{ !fromJSON(env.VERSION_ONLY) }}
         run: |
           set -e
           # dev-branch and working-1.6 already carry this script; any new
@@ -269,6 +335,7 @@ jobs:
           sh .githooks/lib/update-language.sh "$PWD"
 
       - name: Apply PSR2 formatting
+        if: ${{ !fromJSON(env.VERSION_ONLY) }}
         env:
           # The phar refuses to run as a non-interactive "risky" job otherwise.
           PHP_CS_FIXER_IGNORE_ENV: "1"
@@ -381,13 +448,19 @@ jobs:
           redo_work() {
               git reset --hard "origin/$BRANCH"
 
-              # Same guard as the "Regenerate translation template" step: an
-              # rc-*/feature-* branch cut before update-language.sh landed does
-              # not have it. That step already warned; stay silent here.
-              if [ "$LANG_SKIPPED" != "true" ]; then
-                  sh .githooks/lib/update-language.sh "$PWD"
+              # The retry has to honour VERSION_ONLY too. Without this a
+              # version-only run that lost a push race would quietly reintroduce
+              # the regeneration it was explicitly told to skip -- on its second
+              # attempt, where nobody would look for it.
+              if [ "$VERSION_ONLY" != "true" ]; then
+                  # Same guard as the "Regenerate translation template" step: an
+                  # rc-*/feature-* branch cut before update-language.sh landed
+                  # does not have it. That step already warned; stay silent here.
+                  if [ "$LANG_SKIPPED" != "true" ]; then
+                      sh .githooks/lib/update-language.sh "$PWD"
+                  fi
+                  php-cs-fixer fix packages/web --rules=@PSR2 --quiet
               fi
-              php-cs-fixer fix packages/web --rules=@PSR2 --quiet
 
               git add -A
               if git diff --cached --quiet; then
@@ -422,10 +495,27 @@ jobs:
                   version_changed=true
               fi
 
-              if [ "$REGEN_CHANGED" = "true" ] && [ "$version_changed" = "true" ]; then
+              # With version_only the first and last shapes cannot
+              # occur: nothing regenerates, so REGEN_CHANGED is false, and a run
+              # with no version change stages nothing and returns before this is
+              # ever called. Stated so the message can never claim a
+              # regeneration that was switched off.
+              if [ "$VERSION_ONLY" != "true" ] && [ "$REGEN_CHANGED" = "true" ] && [ "$version_changed" = "true" ]; then
                   printf '%s' "Generated Files & Version Sync: regenerate translations/PSR2 formatting and bump version from $OLD_VERSION to $COMPUTED_VERSION ($COMPUTED_CHANNEL) on $BRANCH"
               elif [ "$version_changed" = "true" ]; then
                   printf '%s' "Version Sync: Increment version from $OLD_VERSION to $COMPUTED_VERSION for $COMPUTED_CHANNEL channel on $BRANCH to match commit count since master"
+              elif [ "$REGEN_CHANGED" != "true" ]; then
+                  # Channel-only drift. fog-version.sh sets drifted=true when
+                  # the CHANNEL differs even if the version string does not, so
+                  # OLD_VERSION can equal COMPUTED_VERSION while system.class.php
+                  # still has a staged change. Without this shape that commit
+                  # went out claiming to "regenerate translations and PSR2
+                  # formatting" -- describing work it did not contain.
+                  #
+                  # Reachable before this change, just rare. version_only makes
+                  # it the common case rather than a corner, which is why it is
+                  # fixed here.
+                  printf '%s' "Version Sync: correct FOG_CHANNEL to $COMPUTED_CHANNEL on $BRANCH"
               else
                   printf '%s' "Generated Files Sync: regenerate translations and PSR2 formatting on $BRANCH"
               fi
@@ -554,7 +644,11 @@ jobs:
           {
             echo "## \`${{ matrix.branch }}\`"
             echo ""
-            if [ "${{ steps.regen.outputs.changed }}" = "true" ]; then
+            if [ "$VERSION_ONLY" = "true" ]; then
+              # Not "already current" -- this run never looked. Saying otherwise
+              # would report a check that did not happen as a passing one.
+              echo "⏭️ Translations and PSR2 not checked on this run (version-only). They are corrected on the pull request before it merges; the daily sweep covers everything else."
+            elif [ "${{ steps.regen.outputs.changed }}" = "true" ]; then
               echo "🔧 **Generated files regenerated** - translations and/or PSR2 formatting were stale."
             else
               echo "✅ Generated files already current."
