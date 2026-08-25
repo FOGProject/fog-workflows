@@ -269,12 +269,32 @@ jobs:
             echo "No PHP files under packages/web changed in this pull request."
             exit 0
           fi
+          # ONE INVOCATION PER FILE, deliberately. Do not "optimise" this back
+          # into a single batched call:
+          #
+          #   In ConfigurationResolver.php line 565:
+          #     For multiple paths config parameter is required.
+          #
+          # php-cs-fixer accepts multiple paths on the command line ONLY when
+          # --config is also given. So a batched call succeeds on a pull request
+          # touching one PHP file and fails instantly on one touching two --
+          # which reads as a flaky job rather than a broken one, and cost real
+          # red checks on unrelated pull requests before it was tracked down.
+          #
+          # .githooks/pre-commit's psrfix() loops for the same reason. Matching
+          # it is the point.
+          #
           # No `|| true`: in fix mode the fixer exits 0 whether or not it
           # changed anything, so a non-zero here is a real failure -- a parse
           # error or a missing extension -- and swallowing it would mean
           # pushing a half-formatted file and reporting success.
-          xargs -a "$RUNNER_TEMP/scope.txt" -d '\n' -r \
-            php-cs-fixer fix --rules=@PSR2 --quiet --
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            # A rename can leave the old path listed; skip anything absent
+            # rather than failing the job on it.
+            [ -f "$f" ] || continue
+            php-cs-fixer fix "$f" --rules=@PSR2 --quiet
+          done < "$RUNNER_TEMP/scope.txt"
 
       - name: Regenerate translation template
         id: lang
@@ -340,10 +360,12 @@ jobs:
           #
           # Fail here instead. One red check is the correct outcome; ~30 commits
           # in 20 minutes was the 2026-07-28 outcome.
-          if [ -s "$RUNNER_TEMP/scope.txt" ]; then
-            xargs -a "$RUNNER_TEMP/scope.txt" -d '\n' -r \
-              php-cs-fixer fix --rules=@PSR2 --quiet --
-          fi
+          # Per file, for the same reason as the step above.
+          while IFS= read -r f; do
+            [ -n "$f" ] || continue
+            [ -f "$f" ] || continue
+            php-cs-fixer fix "$f" --rules=@PSR2 --quiet
+          done < "$RUNNER_TEMP/scope.txt"
           if [ "$LANG_SKIPPED" != "true" ]; then
             sh .githooks/lib/update-language.sh "$PWD"
           fi
