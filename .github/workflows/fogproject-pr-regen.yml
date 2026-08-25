@@ -184,6 +184,27 @@ jobs:
           # since master plus `git describe --tags`.
           fetch-depth: 0
           fetch-tags: true
+          # Commits and trees, not file contents. fetch-depth:0 makes checkout
+          # fetch EVERY branch and tag at full depth
+          # (+refs/heads/*:refs/remotes/origin/* +refs/tags/*:refs/tags/*), and
+          # fogproject is ~1GB of history across 888 refs. GitHub serves that
+          # from a warm pack in about 26 seconds; when the pack has to be
+          # rebuilt -- which is exactly what a push to the PR head does, and
+          # this job pushes -- the same fetch sits there for minutes. Three
+          # consecutive pull requests stalled here on their FIRST regen attempt
+          # and completed in 48s on a rerun, which is that cold-pack shape.
+          #
+          # blob:none keeps every commit, tree and tag, so `git merge-base`
+          # below, the commit count since master and `git describe --tags` all
+          # still work; only file CONTENT becomes lazy. The working tree is
+          # still materialised in full at checkout, so php-cs-fixer and
+          # update-language.sh (which walk the filesystem) are unaffected, and
+          # the scope step's `diff --name-only` needs no blobs at all.
+          #
+          # Note the scope step already fetches the one base ref it needs by
+          # name, so nothing here depends on the all-branches fetch having
+          # happened -- only on the DEPTH.
+          filter: blob:none
 
       - name: Install tooling
         run: |
