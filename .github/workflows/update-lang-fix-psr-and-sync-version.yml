@@ -271,6 +271,18 @@ jobs:
           # below (commit count since master, `git describe --tags`).
           fetch-depth: 0
           fetch-tags: true
+          # Commits and trees, not file contents -- the same change, for the
+          # same reason, as fogproject-pr-regen.yml's checkout. Both clone the
+          # same ~1GB repository at full depth across every ref, and both push
+          # to it, which is what leaves the server-side pack cold for the next
+          # fetch. It is only VISIBLE on the pull-request job, because a slow
+          # cron tick blocks nobody -- which is precisely why it is worth
+          # fixing here too rather than waiting for it to be noticed.
+          #
+          # Safe for the whole-tree php-cs-fixer pass below: a blobless clone
+          # still materialises the full working tree at checkout. Only history
+          # is lazy, and nothing here reads historical file content.
+          filter: blob:none
 
       - name: Install tooling
         run: |
