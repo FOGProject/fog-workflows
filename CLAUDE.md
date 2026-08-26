@@ -129,6 +129,18 @@ don't "simplify" those back to the default `GITHUB_TOKEN` just because the call 
   triggers for inactivity (GitHub auto-disables scheduled workflows after 60 days with no repo
   activity). Uses `PhrozenByte/gh-workflow-immortality` against this repo.
 
+- **`fos-tests.yml`** — runs `fos`'s own `tests/run-all.sh` on a pull request. `workflow_call`
+  only, invoked by a stub in `fos/.github/workflows/tests.yml`; same shape and same reasoning as
+  `fogproject-tests.yml`. Writes nothing — no App token, no commit, no API call — so it cannot
+  trigger itself. Its one non-obvious step is `apt install gawk`: `fos`'s `procsfdisk.awk` uses
+  `asort()`/`PROCINFO` and its `funcs.sh` uses `gensub()`, all gawk extensions, and
+  `ubuntu-latest` resolves `awk` to mawk. Three checks fail without it, and they fail as wrong
+  partition *arithmetic* rather than as a syntax error. `tests/run-all.sh` refuses up front on a
+  non-gawk `awk`, so the job would exit 2 rather than go quietly wrong — but installing it is
+  what makes the suite actually run. Added because `fos` had four workflows and all of them were
+  release or `workflow_dispatch`, so none of its fifteen assertion harnesses had ever run on a
+  pull request.
+
 - **`fogproject-pr-regen.yml`** — regenerates fogproject's derived files *on a pull request*
   rather than on the base branch after it merges. `workflow_call` only, invoked by a `regen`
   job in fogproject's `.github/workflows/tests.yml` that `needs:` the test suite — a caller
