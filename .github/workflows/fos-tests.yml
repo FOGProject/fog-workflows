@@ -1,0 +1,115 @@
+name: fos test suite
+
+# Runs fos's own tests/run-all.sh against a pull request.
+#
+# Called as a reusable workflow by a small stub living in fos
+# (.github/workflows/tests.yml), because a pull_request trigger can only fire
+# from the repository the PR is opened against. Same shape and same reasoning as
+# fogproject-tests.yml next door: the stub is a few lines and never changes, so
+# a fix to the runner does not mean editing a file in another repository.
+#
+# Why this exists: fos had four workflows and every one of them was a release or
+# a workflow_dispatch, so no pull request had ever run a test. Meanwhile the
+# repository carries fifteen assertion harnesses and a golden-output differential
+# -- several of them mutation-verified, several written specifically because the
+# bug they catch is invisible from a code read (the partition arithmetic in
+# fill-engine and resize-engine, the subshell trap in server-post-reporting).
+# All of it ran only when somebody remembered to run it locally.
+#
+# This workflow writes nothing -- no token beyond the caller's read-only
+# GITHUB_TOKEN, no commit, no API call -- so unlike the fogproject regen job it
+# has no way to trigger another run of itself.
+
+on:
+  workflow_call:
+    # Both default to the caller's own event, so the fos stub stays short. They
+    # exist for the same reason fogproject-tests.yml has them: a bare
+    # `actions/checkout` resolves to the CALLING repository, so anything in THIS
+    # repository that wants to gate a fos ref has to be able to say which one --
+    # and without that it would check out fog-workflows, find no
+    # tests/run-all.sh, and pass. The "did we actually check out the suite" step
+    # below closes that hole rather than trusting the input.
+    inputs:
+      repository:
+        description: 'Repository to test. Defaults to the caller (the fos stub).'
+        required: false
+        type: string
+        default: ''
+      branch:
+        description: 'Ref to test. Defaults to the caller''s event ref (the PR merge ref).'
+        required: false
+        type: string
+        default: ''
+
+concurrency:
+  group: fos-tests-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  suite:
+    name: tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.branch || github.ref }}
+
+      - name: Install gawk
+        # NOT optional, and not a harness convenience. procsfdisk.awk uses
+        # asort() and PROCINFO and funcs.sh uses gensub(); ubuntu-latest resolves
+        # `awk` to mawk, which has none of them. Measured with `gawk
+        # --traditional`, three checks fail without it -- fill-engine,
+        # mbr-extended and resize-engine -- and they fail as wrong partition
+        # ARITHMETIC rather than as a syntax error, because a missing asort() is
+        # just an unknown function whose absence reorders the table.
+        #
+        # tests/run-all.sh refuses up front rather than reporting those three as
+        # failures, so without this step the job would exit 2 with a clear
+        # message instead of going quietly wrong. Installing it is what makes
+        # the suite actually run.
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq gawk
+          # Debian's alternatives put gawk ahead of mawk, but assert it rather
+          # than assume: a suite that silently ran under the wrong awk is
+          # exactly the failure this step exists to prevent.
+          if ! awk 'BEGIN { exit (gensub(/a/, "b", "g", "aa") == "bb") ? 0 : 1 }' </dev/null; then
+            echo "::error::awk is still not gawk after installing it ($(readlink -f "$(command -v awk)"))."
+            exit 1
+          fi
+
+      - name: Confirm the checkout actually carries the suite
+        # Fail loudly rather than green-ly, the same closure fogproject-tests.yml
+        # carries. `run:` steps default to `bash -e {0}` with NO pipefail, so a
+        # missing runner exits 127 into a tee that exits 0 and the step PASSES.
+        # That mode is reachable here the moment the `repository` input is used,
+        # so it is closed before anything can rely on a green check.
+        run: |
+          if [ ! -f tests/run-all.sh ]; then
+            echo "::error::No tests/run-all.sh in ${{ inputs.repository || github.repository }}@${{ inputs.branch || github.ref }}."
+            echo "::error::Nothing was tested. Check the repository/branch inputs."
+            exit 1
+          fi
+
+      - name: Run the suite
+        # `shell: bash` and not the default, which is `bash -e {0}` with NO
+        # pipefail -- the pipe into tee would discard the suite's exit status and
+        # pass whatever tee returned. That is not hypothetical: it is precisely
+        # how fogproject's schema job reported green for its whole life while
+        # failing 12 of 278 statements (fogproject GH-1241).
+        shell: bash
+        run: sh tests/run-all.sh | tee "$RUNNER_TEMP/suite.txt"
+
+      - name: Summarise
+        if: always()
+        run: |
+          {
+            echo '### FOS test suite'
+            echo ''
+            echo '```'
+            tail -n 20 "$RUNNER_TEMP/suite.txt" 2>/dev/null || echo 'suite produced no output'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
