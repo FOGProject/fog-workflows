@@ -79,6 +79,63 @@ name: fogproject PR regeneration
 #
 #   Adding [skip ci] to the commit message. Same deadlock, same reason.
 #
+# THE VERSION MATH (only when sync_version is true)
+#
+# FOG_VERSION is `git rev-list master..HEAD --count` put through
+# .githooks/lib/fog-version.sh. Computing it here -- before the merge -- means
+# predicting what that count will be AFTER the merge. That prediction is only
+# possible because the base branch's ruleset forces two things:
+#
+#   * branches must be up to date before merging, so base is an ancestor of
+#     head and the merge adds no commits from base's side;
+#   * the merge method is a merge commit, so the merge adds exactly one.
+#
+# Let H = count(master..HEAD) as this job finds it. The merge will produce
+# H + 1, plus one more for any commit this job itself writes. Measured, not
+# assumed: a throwaway repo with base at 2 and head at 4 merged --no-ff to 6
+# after CI added one commit.
+#
+# The `+1` that fog-version.sh's mode 1 already applies is for the commit the
+# CALLER is about to write -- it knows nothing about a merge commit. So the
+# merge commit needs its own +1, and that is what the empty marker commit in
+# the compute step below is for: it makes gitcount read H+1, and then the
+# script's own mode logic supplies the second increment. The marker is removed
+# with `git reset --soft` immediately afterwards, which preserves the staged
+# index (verified). It is not `+2` written out longhand, because the version
+# formula lives in fogproject and this repository only ever calls it.
+#
+# WHY local_flag IS STILL COMPUTED THE SAME WAY, AND WHY THAT IS WHAT TERMINATES
+#
+# The existing contract -- local_flag = 1 iff the regeneration staged something
+# -- carries over unchanged, and it is load-bearing for termination:
+#
+#   regen staged something  -> mode 1 -> drifted forced true, gitcount+1 = H+2.
+#                              A commit is definitely being written. Correct.
+#   regen staged nothing    -> mode 0 -> honest check against f(H+1).
+#                              Not drifted: nothing is written, the merge adds
+#                              only itself, and f(H+1) is already right.
+#                              Drifted: mode 0 applies its own +1 -> H+2, and a
+#                              commit is written. Correct either way.
+#
+# Now the re-run this job's own push triggers: head carries the commit, so
+# H' = H+1, the marker makes gitcount H+2, the regeneration is clean so
+# local_flag is 0, and mode 0 compares f(H+2) against the committed value --
+# which IS f(H+2), because that is what the previous run wrote. drifted=false,
+# nothing staged, no push. The chain stops.
+#
+# Calling mode 1 unconditionally would instead return f(H+3) on that re-run and
+# push forever. Verified against the real script: with the version already
+# matching the count, mode 0 returns drifted=false while mode 1 returns the
+# next version and drifted=true. Do not "simplify" local_flag to a constant.
+#
+# WHY THE UP-TO-DATE CHECK IS A RUNTIME GATE AND NOT JUST A RULESET SETTING
+#
+# The ruleset blocks the MERGE, but this job runs earlier than that, and base
+# can move between the two. If it has, H no longer includes base's tip and the
+# prediction is wrong -- so the gate skips the version step rather than
+# committing a number it cannot stand behind. The contributor has to update the
+# branch before they can merge anyway, and that push re-runs this job.
+#
 # WHY NO RETRY LOOP, UNLIKE THE SWEEP
 #
 # The sweep needs redo_work() because nothing else would re-fire it. Here, a
@@ -110,6 +167,11 @@ on:
         required: false
         type: string
         default: ''
+      sync_version:
+        description: "Also compute and commit the post-merge FOG_VERSION/FOG_CHANNEL. Requires the base branch to enforce up-to-date branches and merge commits -- see THE VERSION MATH in this file's header."
+        required: false
+        type: boolean
+        default: false
 
 concurrency:
   # Per pull request, and NOT the sweep's global
@@ -400,12 +462,99 @@ jobs:
           fi
           echo "Second pass produced no changes; the regeneration is a fixed point."
 
+      - name: Does this branch contain the tip of its base?
+        id: uptodate
+        if: ${{ inputs.sync_version }}
+        env:
+          BASE_REF: ${{ inputs.base_ref || github.event.pull_request.base.ref }}
+        run: |
+          set -e
+          # Already fetched by the scope step, but this must not depend on that
+          # step's internals.
+          git fetch --no-tags origin "+refs/heads/$BASE_REF:refs/remotes/origin/$BASE_REF"
+
+          if git merge-base --is-ancestor "origin/$BASE_REF" HEAD; then
+            echo "ok=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "ok=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::HEAD does not contain the tip of $BASE_REF, so the post-merge commit count is not knowable yet. Skipping the version bump -- the ruleset requires an up-to-date branch before this can merge, and that push re-runs this job."
+          fi
+
+      - name: Compute the post-merge FOG_VERSION / FOG_CHANNEL
+        id: compute
+        if: ${{ inputs.sync_version && steps.uptodate.outputs.ok == 'true' }}
+        env:
+          BASE_REF: ${{ inputs.base_ref || github.event.pull_request.base.ref }}
+          REGEN_CHANGED: ${{ steps.regen.outputs.changed }}
+        run: |
+          set -e
+          # THE BASE branch name, never the head's. fog-version.sh derives
+          # branchon/branchend by splitting the name it is given on '-', so:
+          #
+          #   working-1.6      -> working / 1.6   -> the formula we want
+          #   jf/fix-1234      -> matches no case -> silent no-op, drifted=false
+          #   feature-anything -> matches feature) -> computes anything.0-feature.N
+          #
+          # That last one is the real hazard: fogproject contributors do use
+          # feature-* branch names, so passing the head would quietly write a
+          # plausible-looking and entirely wrong version onto a PR targeting
+          # working-1.6. Hardcoding base is not a nicety.
+          #
+          # The empty marker commit stands in for the MERGE commit -- see THE
+          # VERSION MATH at the top of this file. Without it every version
+          # written here would be exactly one low, and the merge-time sync would
+          # immediately correct it: the churn this whole change exists to remove.
+          git -c user.name=marker -c user.email=marker@invalid             commit -q --allow-empty -m "marker: stands in for the merge commit"
+
+          local_flag=0
+          [ "$REGEN_CHANGED" = "true" ] && local_flag=1
+          echo "local_flag=$local_flag (regen changed: $REGEN_CHANGED)"
+
+          computed=$(sh .githooks/lib/fog-version.sh "$BASE_REF" "$local_flag")
+
+          # Soft, so the staged regeneration survives. Verified: the index is
+          # unchanged across --allow-empty + reset --soft.
+          git reset -q --soft HEAD~1
+
+          version=$(printf '%s\n' "$computed" | sed -n '1p')
+          channel=$(printf '%s\n' "$computed" | sed -n '2p')
+          drifted=$(printf '%s\n' "$computed" | sed -n '3p')
+
+          echo "version=$version"   >> "$GITHUB_OUTPUT"
+          echo "channel=$channel"   >> "$GITHUB_OUTPUT"
+          echo "drifted=$drifted"   >> "$GITHUB_OUTPUT"
+          echo "computed $version ($channel), drifted=$drifted"
+
+      - name: Apply the version fix
+        id: version
+        if: ${{ steps.compute.outputs.drifted == 'true' }}
+        env:
+          COMPUTED_VERSION: ${{ steps.compute.outputs.version }}
+          COMPUTED_CHANNEL: ${{ steps.compute.outputs.channel }}
+        run: |
+          set -e
+          system_file="packages/web/lib/fog/system.class.php"
+          old_version=$(grep "define('FOG_VERSION'" "$system_file" | sed "s/.*FOG_VERSION', '\([^']*\)');/\1/")
+          echo "old_version=$old_version" >> "$GITHUB_OUTPUT"
+
+          sh .githooks/lib/apply-fog-version.sh "$COMPUTED_VERSION" "$COMPUTED_CHANNEL"
+          git add -- "$system_file"
+          echo "$old_version -> $COMPUTED_VERSION ($COMPUTED_CHANNEL)"
+
       - name: Commit and push to the pull request
         id: commit
         env:
           BOT_SLUG: ${{ steps.app-token.outputs.app-slug }}
           HEAD_REF: ${{ inputs.head_ref || github.event.pull_request.head.ref }}
+          BASE_REF: ${{ inputs.base_ref || github.event.pull_request.base.ref }}
           PR_NUMBER: ${{ github.event.pull_request.number }}
+          REGEN_CHANGED: ${{ steps.regen.outputs.changed }}
+          COMPUTED_VERSION: ${{ steps.compute.outputs.version }}
+          COMPUTED_CHANNEL: ${{ steps.compute.outputs.channel }}
+          # Empty unless the version step actually ran, which is what
+          # build-the-message below keys off to avoid claiming a version change
+          # that did not happen.
+          OLD_VERSION: ${{ steps.version.outputs.old_version }}
         run: |
           set -e
           git config user.name "${BOT_SLUG}[bot]"
@@ -430,7 +579,28 @@ jobs:
 
           suffix=""
           [ -n "$PR_NUMBER" ] && suffix=" (#${PR_NUMBER})"
-          git commit -q -m "Generated Files Sync: regenerate translations and PSR2 formatting${suffix}"
+
+          # Message vocabulary deliberately matches the sweep's, so `git log`
+          # reads the same whichever path made the correction.
+          version_changed=false
+          if [ -n "$OLD_VERSION" ] && [ "$OLD_VERSION" != "$COMPUTED_VERSION" ]; then
+            version_changed=true
+          fi
+
+          if [ "$REGEN_CHANGED" = "true" ] && [ "$version_changed" = "true" ]; then
+            msg="Generated Files & Version Sync: regenerate translations/PSR2 formatting and set version to $COMPUTED_VERSION ($COMPUTED_CHANNEL) for merge into ${BASE_REF}${suffix}"
+          elif [ "$version_changed" = "true" ]; then
+            msg="Version Sync: set version to $COMPUTED_VERSION ($COMPUTED_CHANNEL) for merge into ${BASE_REF}${suffix}"
+          elif [ -n "$OLD_VERSION" ] && [ "$REGEN_CHANGED" != "true" ]; then
+            # Channel-only drift: fog-version.sh reports drift on a channel
+            # change even when the version string is unchanged, so this commit
+            # is real even though the number did not move.
+            msg="Version Sync: correct FOG_CHANNEL to $COMPUTED_CHANNEL for merge into ${BASE_REF}${suffix}"
+          else
+            msg="Generated Files Sync: regenerate translations and PSR2 formatting${suffix}"
+          fi
+
+          git commit -q -m "$msg"
 
           if git push origin "HEAD:$HEAD_REF"; then
             echo "changed=true" >> "$GITHUB_OUTPUT"
@@ -459,5 +629,15 @@ jobs:
             if [ "${{ steps.lang.outputs.skipped }}" = "true" ]; then
               echo ""
               echo "ℹ️ Translation regeneration was skipped -- this branch predates \`.githooks/lib/update-language.sh\`. PSR2 formatting still ran."
+            fi
+            if [ "${{ inputs.sync_version }}" = "true" ]; then
+              echo ""
+              if [ "${{ steps.uptodate.outputs.ok }}" != "true" ]; then
+                echo "⏭️ Version not computed: this branch does not yet contain the tip of \`${{ inputs.base_ref || github.event.pull_request.base.ref }}\`, so the post-merge commit count is not knowable. Update the branch -- which is required before merging anyway -- and this recomputes."
+              elif [ "${{ steps.compute.outputs.drifted }}" = "true" ]; then
+                echo "🔧 Version set to \`${{ steps.compute.outputs.version }}\` (channel: ${{ steps.compute.outputs.channel }}) -- the value this branch will carry once its merge commit lands."
+              else
+                echo "✅ Version already correct for the post-merge count -- \`${{ steps.compute.outputs.version }}\`."
+              fi
             fi
           } >> "$GITHUB_STEP_SUMMARY"
