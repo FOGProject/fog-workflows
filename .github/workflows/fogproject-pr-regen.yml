@@ -533,7 +533,11 @@ jobs:
           COMPUTED_CHANNEL: ${{ steps.compute.outputs.channel }}
         run: |
           set -e
-          system_file="packages/web/lib/fog/system.class.php"
+          # Resolved, not hardcoded: System moved to src/Base/System.php when
+          # core became PSR-4 on working-1.6, and this job runs against every
+          # fogproject branch, including the ones that have not been ported.
+          system_file="packages/web/src/Base/System.php"
+          [ -f "$system_file" ] || system_file="packages/web/lib/fog/system.class.php"
           old_version=$(grep "define('FOG_VERSION'" "$system_file" | sed "s/.*FOG_VERSION', '\([^']*\)');/\1/")
           echo "old_version=$old_version" >> "$GITHUB_OUTPUT"
 
