@@ -480,11 +480,21 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -uo pipefail
-          sys=packages/web/lib/fog/system.class.php
-          if [ ! -f "$sys" ]; then
-            echo "No $sys on this branch; nothing to check."
+          # Two spellings, new first. Core became PSR-4 on working-1.6 and
+          # System moved to packages/web/src/Base/System.php; dev-branch and
+          # stable have not been ported. This workflow is shared by every
+          # fogproject branch, so it has to resolve the file rather than know
+          # where it is.
+          sys=
+          for candidate in packages/web/src/Base/System.php \
+                           packages/web/lib/fog/system.class.php; do
+            [ -f "$candidate" ] && { sys=$candidate; break; }
+          done
+          if [ -z "$sys" ]; then
+            echo "No System pin file on this branch; nothing to check."
             exit 0
           fi
+          echo "Reading pins from $sys"
 
           # Same awk the installer uses (lib/common/config.sh), so the check
           # and the fetcher cannot disagree about what the pin says. Read
