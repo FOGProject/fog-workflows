@@ -143,10 +143,21 @@ don't "simplify" those back to the default `GITHUB_TOKEN` just because the call 
 
 - **`fogproject-pr-regen.yml`** — regenerates fogproject's derived files *on a pull request*
   rather than on the base branch after it merges. `workflow_call` only, invoked by a `regen`
-  job in fogproject's `.github/workflows/tests.yml` that `needs:` the test suite — a caller
-  job that `uses:` a reusable workflow succeeds only if every job in the called workflow did,
-  so that `needs:` is already "all current tests passed" and no aggregate gate job is needed
-  inside `fogproject-tests.yml`. Runs `php-cs-fixer --rules=@PSR2` over **only the files the
+  job in fogproject's `.github/workflows/tests.yml`. That job runs **first**, with no
+  `needs:`, and the test suite is the job that `needs: regen` — inverted deliberately in
+  2026-08-27. It used to be the other way round (regen gated on a green suite), and the cost
+  was a second full suite run per push: regen's commit raises `synchronize`, and FOG_VERSION
+  is a commit count, so with `sync_version: true` essentially every push to a working-1.6 PR
+  drifts the version and earns a bot commit. The suite is 418 of a run's 447 runner-seconds.
+  Now regen exposes a `pushed` output and the caller skips the suite on any run where regen
+  pushed — that push has already started the run against the corrected tree, and that is the
+  SHA the ruleset gates on. Two consequences worth knowing: regen now runs on PRs whose tests
+  fail (harmless — nothing it does depends on them), and the suite no longer runs on the
+  pre-correction tree (deliberate — if a PSR2 reformat, a deterministic gettext regen or a
+  version string could turn a green tree red, the correction is the bug). Do **not** reach for
+  `[skip ci]` or a `GITHUB_TOKEN` push to get the same saving: working-1.6's ruleset requires
+  seven status contexts, and a push that produces no run leaves the head SHA with none of them
+  and blocks the PR forever. Runs `php-cs-fixer --rules=@PSR2` over **only the files the
   PR touches** (mirroring `.githooks/pre-commit`'s `psrfix()`, not the sweep's whole-tree
   pass, so a contributor's diff never absorbs unrelated pre-existing violations) plus
   `update-language.sh`, then commits once to the PR head with an App token. Deliberately kept

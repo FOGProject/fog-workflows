@@ -4,11 +4,17 @@ name: fogproject PR regeneration
 # instead of on the base branch afterwards.
 #
 # Called as a reusable workflow by a stub in fogproject
-# (.github/workflows/tests.yml), from a job that `needs:` the test suite. A
-# caller job that `uses:` a reusable workflow succeeds only if EVERY job in the
-# called workflow succeeded, so `needs: suite` there already means "all current
-# tests passed" -- no aggregate gate job is needed inside fogproject-tests.yml,
-# and that file keeps its read-only invariant intact.
+# (.github/workflows/tests.yml), which runs it FIRST and makes the test suite
+# `needs:` it. It used to be the other way round -- this job sat behind
+# `needs: suite` so that it only ever corrected a tree whose tests were already
+# green -- and WHY THE SUITE RUNS AFTER THIS JOB below is the whole argument for
+# the swap.
+#
+# The consequence worth stating plainly at the top: this job now regenerates a
+# pull request's derived files whether or not its tests pass. Nothing it does
+# depends on them. The corrections are produced from the tree by deterministic
+# tools, and a red suite is a reason to fix the code, not a reason to leave the
+# catalogue stale.
 #
 # WHY THIS IS A SEPARATE FILE FROM fogproject-tests.yml
 #
@@ -67,17 +73,59 @@ name: fogproject PR regeneration
 #      commit and there is still work to do. That bound holds whether or not
 #      the idempotency argument is true, which is the entire point of it.
 #
+# WHY THE SUITE RUNS AFTER THIS JOB, AND ONLY ONCE
+#
+# This job used to sit behind `needs: suite`, so a push that needed a
+# correction cost TWO full test runs: one on the contributor's tree, then one
+# on the corrected tree. Measured on fogproject pull request runs 2026-08-26/27,
+# the suite is 418 of a run's 447 runner-seconds and this job is the other 29,
+# so the second run was ~94% waste -- and it was not occasional. FOG_VERSION is
+# a commit count, so with `sync_version: true` essentially EVERY push to a
+# working-1.6 pull request drifts the version and earns a bot commit.
+#
+# The ordering is inverted instead. fogproject's stub runs this job FIRST and
+# makes the suite `needs: regen`, skipping the suite entirely on any run where
+# this job pushed -- because that push has already started the run that will
+# test the corrected tree. One contributor push therefore costs one regen pass,
+# one bot commit, a second regen pass that finds nothing, and exactly ONE suite
+# run, against the tree that actually merges.
+#
+# That is what the `pushed` output below exists for, and it is the only reason
+# it exists.
+#
+# The gate is not weakened by this. The SHA the ruleset gates on is the
+# post-correction SHA either way, and it is fully tested either way; what is
+# gone is a run against a tree that was superseded a minute later. What DOES
+# change is that the suite no longer runs on the PRE-correction tree, and that
+# is deliberate: the corrections are a PSR2 reformat of the pull request's own
+# files, a deterministic gettext regeneration, and a version string. If any of
+# those could turn a green tree red, the correction is the bug and this
+# workflow should not be making it.
+#
 # TWO THINGS THAT LOOK LIKE SIMPLIFICATIONS AND ARE TRAPS
 #
 #   Pushing with GITHUB_TOKEN instead of the App token. A GITHUB_TOKEN push
 #   does not trigger workflows, which sounds like exactly what a loop-averse
-#   reader wants. It is a deadlock in waiting: once required status checks are
-#   on, checks attach to the head SHA, and a push that produces no run leaves
-#   the new SHA with no checks and the PR stuck on "Expected -- waiting for
-#   status" forever. The App token is both the convention here and the
-#   functional requirement; they happen to agree.
+#   reader wants -- and doubly so after the section above, where not re-running
+#   CI is the whole objective. It is a deadlock, and no longer a hypothetical
+#   one: working-1.6 has carried the ruleset "working-1.6 pull request gate"
+#   since 2026-08-26, which requires seven status contexts --
 #
-#   Adding [skip ci] to the commit message. Same deadlock, same reason.
+#     fogproject / tests (PHP 7.4)         fogproject / schema on mariadb:10.5
+#     fogproject / tests (PHP 8.3)         fogproject / schema on mariadb:11.8
+#     fogproject / vendor matches composer.lock
+#     fogproject / release pins resolve    fogproject / schema on mysql:8.0
+#
+#   Checks attach to the head SHA. A push that produces no workflow run leaves
+#   the new head carrying none of those seven and parks the pull request on
+#   "Expected -- waiting for status to be reported" forever. The App token is
+#   both the convention here and the functional requirement; they agree.
+#
+#   Adding [skip ci] to the commit message. Same deadlock, same reason, and it
+#   is the obvious-looking way to implement the section above. The suite is
+#   skipped by a job-level `if:` in fogproject's stub INSTEAD, and only on the
+#   run that has just superseded its own SHA -- the corrected commit still gets
+#   a real run, so the seven contexts still land on the SHA that merges.
 #
 # THE VERSION MATH (only when sync_version is true)
 #
@@ -145,6 +193,10 @@ name: fogproject PR regeneration
 
 on:
   workflow_call:
+    outputs:
+      pushed:
+        description: "true when this run committed to the pull request's head branch. The caller uses it to SKIP the test suite on this run: the push has already started a fresh run against the corrected commit, and that is the run whose checks the ruleset will gate on. See WHY THE SUITE RUNS AFTER THIS JOB in this file's header."
+        value: ${{ jobs.regen.outputs.pushed }}
     inputs:
       # All optional and resolved against the pull_request event at the use
       # site, the same idiom (and for the same reason -- workflow_call inputs
@@ -204,6 +256,12 @@ jobs:
     name: regenerate generated files
     # Pinned, and the same image the sweep uses, for gettext version parity.
     runs-on: ubuntu-24.04
+    outputs:
+      # Deliberately the commit step's own `changed`, which is true only when a
+      # push actually SUCCEEDED. A push that lost a race sets it false, and that
+      # is the right answer here: no new run was started by us, so the caller
+      # must not skip its suite on the strength of one.
+      pushed: ${{ steps.commit.outputs.changed }}
 
     steps:
       - uses: actions/create-github-app-token@v3
@@ -624,7 +682,7 @@ jobs:
             if [ "${{ steps.commit.outputs.changed }}" = "true" ]; then
               echo "🔧 Pushed one correction commit to \`${{ inputs.head_ref || github.event.pull_request.head.ref }}\` (${{ steps.scope.outputs.count }} PHP file(s) in scope)."
               echo ""
-              echo "That push re-runs the suite once against the corrected commit. The re-run makes no further changes -- both operations are idempotent, and the \"Assert regeneration converged\" step above proved it on this tree -- so the chain stops there."
+              echo "The test suite was **not** run on this SHA: the push above already started a fresh run against the corrected commit, and that is the run the branch ruleset gates on. That re-run makes no further changes -- both operations are idempotent, and the \"Assert regeneration converged\" step above proved it on this tree -- so the chain stops there."
             elif [ "${{ steps.commit.outputs.changed }}" = "false" ]; then
               echo "✅ Nothing to correct; formatting and translations were already current."
             else
