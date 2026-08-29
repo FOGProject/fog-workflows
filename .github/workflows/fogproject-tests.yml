@@ -437,6 +437,72 @@ jobs:
         shell: bash
         run: php tests/schema-executes.test.php 2>&1 | tee "$RUNNER_TEMP/schema.txt"
 
+      # The DB-backed halves of fogproject's own suite, which until now had
+      # never run in CI on any workflow.
+      #
+      # The `suite` job runs tests/run-all.sh with no database and no
+      # FOG_TEST_DSN, so every test carrying a database half SKIPS there and
+      # reports green on the half that did run. This job is the only one with
+      # a server, and it ran exactly one test. The cost of that gap is
+      # measurable: tests/tasklog-report-retention.test.php had a fixture
+      # count that said six while seven rows were inserted, so its read half
+      # was red on every machine with a database and green on every machine
+      # without -- which is all of CI. It sat that way from the day the
+      # seventh row was added.
+      #
+      # NOT `continue-on-error`. Every leg of this job tolerates the SCHEMA
+      # step because of fogproject GH-1241, and that tolerance is scoped to
+      # that step deliberately -- it is about historical ALTERs replaying
+      # against a modern server, and says nothing about these tests. A gate
+      # nobody can fail is the thing this step exists to stop.
+      #
+      # ONE LEG. These tests assert on join semantics and TEMPORARY table
+      # behavior, not on collation, so running them three times says the same
+      # thing three times. 11.8 is the leg that is not a duplicate of another
+      # (see the matrix comments above), which makes it the reference.
+      #
+      # DISCOVERED, not listed. Any test naming FOG_TEST_DSN has a database
+      # half by construction, so a new one is picked up without editing this
+      # workflow -- a hardcoded list is how the previous gap would come back.
+      # schema-executes is excluded because the step above already runs it,
+      # tolerated, and running it again here untolerated would redden every
+      # pull request on GH-1241.
+      - name: Run the DB-backed tests
+        if: >-
+          steps.schema_test.outputs.present == 'true'
+          && matrix.server == 'mariadb:11.8'
+        env:
+          # A dbname, unlike the schema step's DSN: these tests create
+          # TEMPORARY tables, and a connection with no default database
+          # answers "No database selected" rather than skipping.
+          FOG_TEST_DSN: mysql:host=127.0.0.1;port=3306;dbname=fogcitests
+          FOG_TEST_USER: root
+          FOG_TEST_PASS: ""
+        # `shell: bash` for pipefail, the same reason the schema step above
+        # carries it -- without it a pipe into tee swallows php's exit status
+        # and the step reports pass whatever the test said.
+        shell: bash
+        run: |
+          # Two statements, not a chained `new`: this runs on PHP 7.4 and
+          # `new Foo()->bar()` without parentheses is 8.4 syntax, which would
+          # be a parse error rather than a failed connection.
+          php -r '$p = new PDO("mysql:host=127.0.0.1;port=3306", "root", "");
+                  $p->exec("CREATE DATABASE IF NOT EXISTS `fogcitests`");'
+          found=0
+          fail=0
+          : > "$RUNNER_TEMP/dbtests.txt"
+          for t in $(grep -l FOG_TEST_DSN tests/*.test.php | grep -v schema-executes); do
+            found=$((found + 1))
+            echo "== $t" | tee -a "$RUNNER_TEMP/dbtests.txt"
+            php "$t" 2>&1 | tee -a "$RUNNER_TEMP/dbtests.txt" || fail=1
+          done
+          if [ "$found" -eq 0 ]; then
+            echo "::error::No test names FOG_TEST_DSN. This step is checking nothing."
+            exit 1
+          fi
+          echo "$found DB-backed test(s) run" | tee -a "$RUNNER_TEMP/dbtests.txt"
+          exit $fail
+
       - name: Summarise
         if: always() && steps.schema_test.outputs.present == 'true'
         run: |
