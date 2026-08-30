@@ -524,7 +524,7 @@ jobs:
       #
       # `sync_version` has no caller since fogproject GH-1510, and a branch
       # carrying .githooks/lib/write-version-file.sh generates FOG_VERSION into
-      # the gitignored packages/web/commons/version.php instead (GH-1512). If
+      # the gitignored packages/web/commons/version.php instead (GH-1513). If
       # the input is ever set again on such a branch, stamping a commit count
       # into the release fallback in src/Base/System.php would put the churn
       # straight back. Same marker, same reasoning, as the sweep's step in

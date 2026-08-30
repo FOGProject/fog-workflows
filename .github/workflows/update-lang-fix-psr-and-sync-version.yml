@@ -385,7 +385,7 @@ jobs:
       # commit, checkout, merge and install, and src/Base/System.php keeps only
       # a release fallback. Stamping a commit count over that fallback would
       # make it lie, and would put a bot commit back on the branch for every
-      # sweep -- which is the churn fogproject GH-1510 and GH-1512 removed.
+      # sweep -- which is the churn fogproject GH-1510 and GH-1513 removed.
       #
       # Detected from the TREE rather than listed in a matrix on purpose: each
       # fogproject branch flips itself the moment its own port lands, and no
