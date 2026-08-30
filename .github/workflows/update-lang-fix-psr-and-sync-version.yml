@@ -377,8 +377,34 @@ jobs:
             git diff --cached --stat
           fi
 
+      # A branch that GENERATES its version must not have one stamped into it.
+      #
+      # The marker is the generator itself: a branch carrying
+      # .githooks/lib/write-version-file.sh writes FOG_VERSION into the
+      # gitignored packages/web/commons/version.php from the commit graph, on
+      # commit, checkout, merge and install, and src/Base/System.php keeps only
+      # a release fallback. Stamping a commit count over that fallback would
+      # make it lie, and would put a bot commit back on the branch for every
+      # sweep -- which is the churn fogproject GH-1510 and GH-1512 removed.
+      #
+      # Detected from the TREE rather than listed in a matrix on purpose: each
+      # fogproject branch flips itself the moment its own port lands, and no
+      # edit here is needed to keep the two in step. A branch without the file
+      # is stamped exactly as before.
+      - name: Does this branch generate its own version?
+        id: genversion
+        run: |
+          set -e
+          if [ -f .githooks/lib/write-version-file.sh ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::${{ matrix.branch }} generates its version into the gitignored packages/web/commons/version.php; not stamping one."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Compute FOG_VERSION / FOG_CHANNEL
         id: compute
+        if: steps.genversion.outputs.skip != 'true'
         run: |
           set -e
           # local=1 when the regen step above just staged a real change:
@@ -489,12 +515,21 @@ jobs:
                   REGEN_CHANGED=true
               fi
 
-              local_flag=0
-              [ "$REGEN_CHANGED" = "true" ] && local_flag=1
-              computed=$(sh .githooks/lib/fog-version.sh "$BRANCH" "$local_flag")
-              COMPUTED_VERSION=$(printf '%s\n' "$computed" | sed -n '1p')
-              COMPUTED_CHANNEL=$(printf '%s\n' "$computed" | sed -n '2p')
-              drifted=$(printf '%s\n' "$computed" | sed -n '3p')
+              # The retry has to honour the generated-version branches too --
+              # and it is re-tested rather than carried, because the reset
+              # above may have landed on a tree where the answer differs.
+              # See the "Does this branch generate its own version?" step.
+              drifted=false
+              COMPUTED_VERSION=""
+              COMPUTED_CHANNEL=""
+              if [ ! -f .githooks/lib/write-version-file.sh ]; then
+                  local_flag=0
+                  [ "$REGEN_CHANGED" = "true" ] && local_flag=1
+                  computed=$(sh .githooks/lib/fog-version.sh "$BRANCH" "$local_flag")
+                  COMPUTED_VERSION=$(printf '%s\n' "$computed" | sed -n '1p')
+                  COMPUTED_CHANNEL=$(printf '%s\n' "$computed" | sed -n '2p')
+                  drifted=$(printf '%s\n' "$computed" | sed -n '3p')
+              fi
 
               # Cleared, not carried. The winning merge may have brought the
               # branch to the correct version by itself, in which case there is

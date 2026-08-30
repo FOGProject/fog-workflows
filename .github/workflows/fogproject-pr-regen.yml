@@ -520,9 +520,29 @@ jobs:
           fi
           echo "Second pass produced no changes; the regeneration is a fixed point."
 
+      # A HARD STOP for branches that generate their version.
+      #
+      # `sync_version` has no caller since fogproject GH-1510, and a branch
+      # carrying .githooks/lib/write-version-file.sh generates FOG_VERSION into
+      # the gitignored packages/web/commons/version.php instead (GH-1512). If
+      # the input is ever set again on such a branch, stamping a commit count
+      # into the release fallback in src/Base/System.php would put the churn
+      # straight back. Same marker, same reasoning, as the sweep's step in
+      # update-lang-fix-psr-and-sync-version.yml.
+      - name: Does this branch generate its own version?
+        id: genversion
+        run: |
+          set -e
+          if [ -f .githooks/lib/write-version-file.sh ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::This branch generates its version into the gitignored packages/web/commons/version.php; not stamping one."
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Does this branch contain the tip of its base?
         id: uptodate
-        if: ${{ inputs.sync_version }}
+        if: ${{ inputs.sync_version && steps.genversion.outputs.skip != 'true' }}
         env:
           BASE_REF: ${{ inputs.base_ref || github.event.pull_request.base.ref }}
         run: |
@@ -694,7 +714,9 @@ jobs:
             fi
             if [ "${{ inputs.sync_version }}" = "true" ]; then
               echo ""
-              if [ "${{ steps.uptodate.outputs.ok }}" != "true" ]; then
+              if [ "${{ steps.genversion.outputs.skip }}" = "true" ]; then
+                echo "⏭️ Version not computed: this branch generates \`FOG_VERSION\` into the gitignored \`packages/web/commons/version.php\`, so there is nothing to stamp. See \`.githooks/lib/write-version-file.sh\`."
+              elif [ "${{ steps.uptodate.outputs.ok }}" != "true" ]; then
                 echo "⏭️ Version not computed: this branch does not yet contain the tip of \`${{ inputs.base_ref || github.event.pull_request.base.ref }}\`, so the post-merge commit count is not knowable. Update the branch -- which is required before merging anyway -- and this recomputes."
               elif [ "${{ steps.compute.outputs.drifted }}" = "true" ]; then
                 echo "🔧 Version set to \`${{ steps.compute.outputs.version }}\` (channel: ${{ steps.compute.outputs.channel }}) -- the value this branch will carry once its merge commit lands."
