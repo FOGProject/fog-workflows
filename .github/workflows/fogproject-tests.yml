@@ -519,6 +519,146 @@ jobs:
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
+  rehearsal:
+    name: upgrade rehearsal
+    runs-on: ubuntu-latest
+
+    # A DECAY GATE, not the rehearsal.
+    #
+    # fogproject's bin/upgrade-rehearsal-lab.sh runs three starting points
+    # against a decade of seeded dirty data and its deliverable is a failure
+    # LIST -- a pre-release exercise, run by hand, deliberately not in CI. That
+    # does not change.
+    #
+    # What this catches is the harness rotting. The rehearsal BOOTS THE WHOLE
+    # APPLICATION -- autoloader, Config, DatabaseManager, the real schema runner
+    # -- so a change to any of those breaks it, and nothing would say so until
+    # somebody reached for it before a release and found it dead. `suite` cannot
+    # see that (no database), and `schema` cannot either (empty database, one
+    # test). This runs one starting point and proves the harness still works.
+    #
+    # IT ASSERTS THE KNOWN RESULT, NOT A CLEAN ONE. Two constraints are expected
+    # to be missing on this fixture today (a structural errno 150 from the
+    # seed's widened column, and one RESTRICT orphan the sweep correctly does
+    # not touch). Asserting zero would be a lie about the state of the code;
+    # asserting nothing would be a gate nobody can fail. The expected output
+    # lives in fogproject at tests/fixtures/upgrade-rehearsal-baseline.txt --
+    # IN THAT REPOSITORY, on purpose, so a change that legitimately moves the
+    # numbers updates the baseline in the same commit and the diff is visible to
+    # its reviewer. A number hardcoded here goes stale where nobody making the
+    # change is looking.
+    #
+    # NOT `continue-on-error`. The `schema` job's legs are tolerated because of
+    # fogproject GH-1241, and that tolerance is scoped to that step deliberately.
+    # It says nothing about this one, and a gate nobody can fail is the thing
+    # these jobs exist to stop.
+    #
+    # ONE ENGINE. This asserts constraint and sweep behavior, not collation, so
+    # running it on three servers would say the same thing three times. 11.8 is
+    # the leg that is not a duplicate of another (see the `schema` matrix), which
+    # makes it the reference here too.
+
+    services:
+      db:
+        image: mariadb:11.8
+        env:
+          MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "yes"
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mariadb-admin ping -h 127.0.0.1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.branch || github.ref }}
+
+      - name: Does this branch have the upgrade rehearsal?
+        id: rehearsal
+        # Same probe pattern as the other jobs, and for the same reason: this
+        # workflow is shared by every fogproject branch and only the 1.6 line
+        # carries the harness. Decided from the tree rather than the branch
+        # name, because the branch that has it is a thing that will change.
+        # Both files are required -- the runner is useless without its baseline,
+        # and a missing baseline should read as "not on this branch" rather than
+        # as a failure.
+        run: |
+          if [ -f tests/upgrade-rehearsal-ci.test.sh ] \
+            && [ -f tests/fixtures/upgrade-rehearsal-baseline.txt ]; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+            {
+              echo '### upgrade rehearsal'
+              echo ''
+              echo 'No `tests/upgrade-rehearsal-ci.test.sh` (or no baseline) on'
+              echo 'this branch, so there is nothing to rehearse. Skipped.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Set up PHP 7.4
+        if: steps.rehearsal.outputs.present == 'true'
+        uses: shivammathur/setup-php@v2
+        with:
+          # 7.4 is fogproject's supported floor and an upgrade has to run on it.
+          # The extension list matches the `schema` job's: the rehearsal boots
+          # the real application, which uses gettext and openssl during init.
+          php-version: '7.4'
+          extensions: pdo_mysql, gettext, openssl, json
+          coverage: none
+
+      - name: Wait for the server
+        if: steps.rehearsal.outputs.present == 'true'
+        # The service health check gates the job STARTING, not the server being
+        # ready on the mapped port. Connecting the way the harness will is the
+        # only check that means anything here.
+        run: |
+          for i in $(seq 1 30); do
+            if php -r 'new PDO("mysql:host=127.0.0.1;port=3306", "root", "");' 2>/dev/null; then
+              echo "server accepting connections after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::database service never accepted a connection"
+          exit 1
+
+      - name: Rehearse a 1.5 -> 1.6 upgrade
+        if: steps.rehearsal.outputs.present == 'true'
+        env:
+          # No dbname: the harness creates and drops its own, and its
+          # live-database guard refuses the names a real install uses.
+          REHEARSAL_CI_HOST: 127.0.0.1;port=3306
+          REHEARSAL_CI_USER: root
+          REHEARSAL_CI_PASS: ""
+          REHEARSAL_CI_DB: reh_ci
+        # `shell: bash` for pipefail, the same reason every other step here
+        # carries it -- without it a pipe into tee swallows the exit status and
+        # the step reports pass whatever the harness said.
+        shell: bash
+        run: bash tests/upgrade-rehearsal-ci.test.sh 2>&1 | tee "$RUNNER_TEMP/rehearsal.txt"
+
+      - name: Summarise
+        if: always() && steps.rehearsal.outputs.present == 'true'
+        run: |
+          {
+            echo '### upgrade rehearsal'
+            echo ''
+            echo '```'
+            cat "$RUNNER_TEMP/rehearsal.txt" 2>/dev/null || echo 'no output'
+            echo '```'
+            echo ''
+            echo '> Asserts the KNOWN result, not a clean one. Two constraints are'
+            echo '> expected to be missing on this fixture. The expected output is'
+            echo '> `tests/fixtures/upgrade-rehearsal-baseline.txt` in fogproject --'
+            echo '> update it in the same commit as any change that moves it.'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   pins:
     name: release pins resolve
     runs-on: ubuntu-latest
