@@ -690,7 +690,7 @@ jobs:
 
           # shields.io rejects an empty message ("invalid properties: message"),
           # so an empty value would publish a broken badge and a green job.
-          # working-1.6 did exactly that from 2026-08-30 on.
+          # working-1.6 did exactly that from 2026-08-31 on.
           if [ -z "$version" ]; then
             echo "::error::No version computed for ${{ matrix.branch }}; not publishing an empty badge."
             exit 1
