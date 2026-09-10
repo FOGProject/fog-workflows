@@ -673,12 +673,34 @@ jobs:
           # CLAUDE.md asks for on this repo regardless: "don't 'simplify' those
           # back to the default GITHUB_TOKEN just because the call is same-repo."
           GH_TOKEN: ${{ steps.badge-token.outputs.token }}
+        id: badge
         run: |
           set -e
+          version="${{ steps.commit.outputs.final_version || steps.compute.outputs.version }}"
+
+          # A branch that generates its own version skipped the compute step,
+          # so neither output above is set there. Build version.php the way
+          # bin/installfog.sh does -- the branch's own write-version-file.sh --
+          # and read it back. HEAD already includes anything the commit step
+          # pushed, so this describes what the branch now carries.
+          if [ "${{ steps.genversion.outputs.skip }}" = "true" ]; then
+            sh .githooks/lib/write-version-file.sh
+            version=$(sed -n "s/.*define('FOG_VERSION', '\([^']*\)');.*/\1/p" packages/web/commons/version.php 2>/dev/null || true)
+          fi
+
+          # shields.io rejects an empty message ("invalid properties: message"),
+          # so an empty value would publish a broken badge and a green job.
+          # working-1.6 did exactly that from 2026-08-30 on.
+          if [ -z "$version" ]; then
+            echo "::error::No version computed for ${{ matrix.branch }}; not publishing an empty badge."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
           path="badges/${{ matrix.branch }}.json"
           body=$(jq -n \
             --arg label "${{ matrix.branch }}" \
-            --arg message "${{ steps.commit.outputs.final_version || steps.compute.outputs.version }}" \
+            --arg message "$version" \
             '{schemaVersion: 1, label: $label, message: $message, color: "blue", cacheSeconds: 3600}')
           content=$(printf '%s' "$body" | base64 -w0)
 
@@ -708,7 +730,11 @@ jobs:
             else
               echo "✅ Generated files already current."
             fi
-            if [ "${{ steps.compute.outputs.drifted }}" != "true" ]; then
+            if [ "${{ steps.genversion.outputs.skip }}" = "true" ]; then
+              # The compute step never ran here, so the arm below would print
+              # an empty version as "already correct".
+              echo "⏭️ Version not stamped: this branch generates it into \`packages/web/commons/version.php\`. Badge: \`${{ steps.badge.outputs.version }}\`"
+            elif [ "${{ steps.compute.outputs.drifted }}" != "true" ]; then
               echo "✅ Version already correct - \`${{ steps.compute.outputs.version }}\` (channel: ${{ steps.compute.outputs.channel }})"
             elif [ "${{ steps.commit.outputs.changed }}" = "false" ]; then
               # A retry that rebuilt onto a branch somebody else had already

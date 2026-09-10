@@ -76,7 +76,11 @@ don't "simplify" those back to the default `GITHUB_TOKEN` just because the call 
   6. For `dev-branch` and `working-1.6`, also commits an updated `badges/<branch>.json` in
      *this* repo via the Contents API, using its own App token scoped to `fog-workflows`. Not
      `github.token`: under `workflow_call` that is the *caller's* token, which cannot write to
-     another repository.
+     another repository. A branch that carries `.githooks/lib/write-version-file.sh` skips steps
+     3 and 4, so its badge comes from running that script and reading the generated
+     `packages/web/commons/version.php`, the same file `bin/installfog.sh` builds. The step
+     fails rather than publish an empty message, which shields.io renders as
+     "invalid properties: message".
   - It runs on a **schedule** and on **merge**, and the difference between those two entry
     points matters. The schedule is the only cover for direct pushes, for merged fork PRs, and
     for `rc-*`/`feature-*`. The merge path is `fogproject`'s `sync-generated-files.yml`, which
