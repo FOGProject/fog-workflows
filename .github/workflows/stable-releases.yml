@@ -251,18 +251,34 @@ jobs:
             GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
   close-pr-if-tests-fail:
-    # Both failure arms, not just the install one. `if: failure()` alone is not
-    # enough once there is a gate in front of run-install-tests: a failing
-    # run-unit-tests SKIPS run-install-tests and check-all-..., and a job whose
-    # dependency was skipped is itself skipped unless its condition is
-    # always()-rooted. Without this the release PR would be left open with no
-    # Discord announcement -- a release that quietly stalls instead of visibly
-    # failing. See fogproject GH-1222.
-    needs: [create-release-pull-request, run-unit-tests, check-all-tests-completed-successfully]
+    # One arm per gate job, and `if: failure()` is not a substitute for any of
+    # them. A job whose dependency was SKIPPED is itself skipped unless its
+    # condition is always()-rooted -- and an always()-rooted condition matches
+    # nothing implicitly, so every failure it should catch has to be named.
+    # Only the first gate to fail reports 'failure'; the gates behind it report
+    # 'skipped', which is not 'failure' and matches no arm on its own.
+    #
+    # MAINTENANCE RULE: adding a gate job in front of the merge means adding an
+    # arm here. Miss one and the release PR is left open with no Discord
+    # announcement -- a release that quietly stalls instead of visibly failing.
+    # That is not hypothetical: run-install-tests was added to the chain
+    # without an arm, and when it failed on 2026-09-11 this job was skipped and
+    # fogproject#1761 sat open in silence. See fogproject GH-1222.
+    #
+    # Only the three PRE-MERGE gates belong here. sync-and-check-... failing
+    # skips PR creation, so there is nothing to close; the post-merge jobs
+    # (merge-after-all-tests-passed, tag-and-release, sync-branches) fail after
+    # the PR is already merged, where closing it would be wrong.
+    #
+    # Enumerated rather than contains(needs.*.result, 'failure') because the
+    # wildcard would also match create-release-pull-request, which is in needs
+    # only for its outputs -- and when THAT fails there is no PR to close.
+    needs: [create-release-pull-request, run-unit-tests, run-install-tests, check-all-tests-completed-successfully]
     runs-on: ubuntu-24.04
     if: >-
       always() &&
       (needs.run-unit-tests.result == 'failure' ||
+       needs.run-install-tests.result == 'failure' ||
        needs.check-all-tests-completed-successfully.result == 'failure')
 
     steps:
@@ -284,26 +300,44 @@ jobs:
 
       - name: Get PR number
         run: |
-           pr_number=$(gh pr list --search "is:open Stable Release PR For* in:title" --repo FOGProject/fogproject --json title,number --jq '.[] | select(.title | test("Stable Release PR For*"; "i")) | .number')
+           pr_number=$(gh pr list --search "is:open Stable Release PR For* in:title" --repo FOGProject/fogproject --json title,number --jq '.[] | select(.title | test("Stable Release PR For*"; "i")) | .number' | head -n 1)
            echo "PR_NUMBER=$pr_number" >> $GITHUB_ENV
         env:
             GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Close PR
+        # An empty PR_NUMBER is not a reason to fail the job. It means no open
+        # release PR matched -- closed by hand, or never opened at all -- and
+        # failing here would abort before the announcement, which is the part
+        # that must not be lost.
         run: |
-          closure_message="Closing PR due to failure in tests"
-          PrNum=${{ env.PR_NUMBER }}
-          gh pr close $PrNum --comment "$closure_message" --repo FOGProject/fogproject
+          if [[ -z ${PR_NUMBER:-} ]]; then
+            echo "::warning::No open stable release PR found to close"
+            echo "PR_OUTCOME=no open release PR was found to close" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          gh pr close "$PR_NUMBER" --comment "Closing PR due to failure in tests" --repo FOGProject/fogproject
+          echo "PR_OUTCOME=PR ${PR_NUMBER} closed" >> "$GITHUB_ENV"
         env:
             GH_TOKEN: ${{ steps.app-token.outputs.token }}
 
       - name: Announce error on Discord
+        # always(): a failure in either step above must not swallow the
+        # announcement, or the release goes silent for a second reason.
+        #
+        # status is hard-coded rather than derived from
+        # check-all-tests-completed-successfully.result, which is 'skipped'
+        # whenever run-install-tests is the gate that failed. The action
+        # documents Success, Failure and Cancelled only. This job runs on a
+        # failure arm and nothing else, so the status is already known.
+        if: always()
         uses: sarisia/actions-status-discord@v1
         with:
           webhook: ${{ secrets.DISCORD_WEBHOOK }}
-          content: "Hey @everyone, validation tests failed. PR ${{ env.PR_NUMBER }} closed. Release ${{ needs.create-release-pull-request.outputs.release_tag }} NOT CREATED, latest remains ${{ needs.create-release-pull-request.outputs.previous_tag }}. Please check the logs for details."
+          content: "Hey @everyone, validation tests failed -- ${{ env.PR_OUTCOME || 'release PR state unknown, check it by hand' }}. Release ${{ needs.create-release-pull-request.outputs.release_tag }} NOT CREATED, latest remains ${{ needs.create-release-pull-request.outputs.previous_tag }}. Please check the logs for details."
           title: Validation tests
-          status: ${{ needs.check-all-tests-completed-successfully.result }}
+          status: failure
           color: 0xff0000
 
   tag-and-release:
