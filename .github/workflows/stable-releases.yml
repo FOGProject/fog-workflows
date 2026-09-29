@@ -59,7 +59,19 @@ jobs:
           # no need to check out fogproject and grep system.class.php for it.
           tag=$(jq -r '.message' badges/dev-branch.json)
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          prevTag=$(gh release view --repo FOGProject/fogproject --json tagName --jq '.tagName')
+          # The previous release IN THIS LINE, not GitHub's "Latest". Latest is
+          # the highest release overall, and once a newer line is published
+          # (1.6.0-RC-1) it no longer belongs to the line this job releases:
+          # 1.5.x.<y> is measured against 1.5.x.<y>, 1.6.x.<y> against 1.6.x.<y>.
+          # The line is the tag minus its last dot-field (1.5.10.2504 -> 1.5.10.).
+          # The first release of a line has no predecessor in it, so it falls
+          # back to the highest release below it by version.
+          releases=$(gh release list --repo FOGProject/fogproject --exclude-drafts --limit 500 \
+            --json tagName --jq '.[].tagName')
+          prevTag=$(printf '%s\n' "$releases" | awk -v p="${tag%.*}." 'index($0, p) == 1' | sort -V | tail -n1)
+          if [[ -z $prevTag ]]; then
+            prevTag=$(printf '%s\n%s\n' "$releases" "$tag" | sort -uV | awk -v t="$tag" '$0 == t { print prev; exit } { prev = $0 }')
+          fi
           echo "prevTag=$prevTag" >> "$GITHUB_OUTPUT"
           echo "Tag: $tag"
           echo "Previous Tag: $prevTag"
@@ -483,7 +495,13 @@ jobs:
       env:
         GH_TOKEN: ${{ steps.app-token.outputs.token }}
       run: |
-        gh release create "$TAG" --latest -F "$NOTES_FILE" --target stable --title "$TAG"
+        # Latest only if this is the highest release by version. A 1.5.x release
+        # published after 1.6.0-RC-1 must not take Latest back from it.
+        top=$( { gh release list --repo FOGProject/fogproject --exclude-drafts --limit 500 \
+          --json tagName --jq '.[].tagName'; echo "$TAG"; } | sort -V | tail -n1)
+        if [[ $top == "$TAG" ]]; then latest=--latest; else latest=--latest=false; fi
+        echo "Latest release by version: $top ($latest)"
+        gh release create "$TAG" "$latest" -F "$NOTES_FILE" --target stable --title "$TAG"
 
     - name: Update stable version badge
       env:
