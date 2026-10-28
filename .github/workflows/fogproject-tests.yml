@@ -679,7 +679,8 @@ jobs:
     # a short schema version, or any structure that differs from a fresh
     # install.
     #
-    # TWO LEGS. `stable` is what a 1.5 server runs today. `dev-branch` is where
+    # TWO LEGS. `stable` is what a 1.5 server runs today, pinned (see the
+    # fetch step). `dev-branch` is where
     # the next 1.5 schema change lands first, so that leg goes red on 1.6 pull
     # requests before the change ships in a 1.5 release. Only the `stable` leg
     # is meant to be a required context: a dev-branch change is not the 1.6
@@ -726,12 +727,35 @@ jobs:
             } >> "$GITHUB_STEP_SUMMARY"
           fi
 
-      - name: Fetch the 1.5 branch
+      - name: Fetch the 1.5 starting point
         if: steps.probe.outputs.present == 'true'
-        run: >-
-          git fetch --no-tags --depth=1
-          https://github.com/FOGProject/fogproject.git
-          "+refs/heads/${{ matrix.from }}:refs/remotes/origin/${{ matrix.from }}"
+        # The `stable` leg is REQUIRED, so it starts from the commit pinned in
+        # the tree under test (tests/fixtures/upgrade-from-15-stable.ref), not
+        # from the tip of stable. A required check must change only when the
+        # pull request changes something. If it read the tip, a 1.5 release
+        # with a schema step would turn every open 1.6 pull request red at
+        # once, and the queue would merge nothing until a fix landed. A pull
+        # request that bumps the pin makes the new 1.5 schema its own problem,
+        # and fixes it in the same change.
+        #
+        # The `dev-branch` leg is advisory, so it floats: it is the early
+        # warning that the next pin bump will need a 1.6 fix.
+        #
+        # A tree without the pin file uses the tip.
+        shell: bash
+        run: |
+          pin=tests/fixtures/upgrade-from-15-stable.ref
+          if [ '${{ matrix.from }}' = stable ] && [ -f "$pin" ]; then
+            sha=$(tr -d '[:space:]' < "$pin")
+            git fetch --no-tags --depth=1 https://github.com/FOGProject/fogproject.git "$sha"
+            echo "FROM_REF=$sha" >> "$GITHUB_ENV"
+            echo "1.5 start: stable pinned at $sha"
+          else
+            git fetch --no-tags --depth=1 https://github.com/FOGProject/fogproject.git \
+              "+refs/heads/${{ matrix.from }}:refs/remotes/origin/${{ matrix.from }}"
+            echo "FROM_REF=origin/${{ matrix.from }}" >> "$GITHUB_ENV"
+            echo "1.5 start: tip of ${{ matrix.from }}"
+          fi
 
       - name: Set up PHP 7.4
         if: steps.probe.outputs.present == 'true'
@@ -763,7 +787,6 @@ jobs:
           UP15_USER: root
           UP15_PASS: ""
           UP15_DB: up15_ci
-          FROM_REF: origin/${{ matrix.from }}
         # pipefail, for the same reason as the rehearsal step above.
         shell: bash
         run: bash tests/upgrade-from-15-ci.test.sh 2>&1 | tee "$RUNNER_TEMP/upgrade15.txt"
