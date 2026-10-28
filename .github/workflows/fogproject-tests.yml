@@ -659,6 +659,126 @@ jobs:
             echo '> update it in the same commit as any change that moves it.'
           } >> "$GITHUB_STEP_SUMMARY"
 
+  upgrade15:
+    name: upgrade from ${{ matrix.from }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # A REAL 1.5 DATABASE, upgraded through the real 1.6 updater
+    # (fogproject GH-2000).
+    #
+    # schemaVersion.vValue is a count of applied schema steps, and 1.5 and 1.6
+    # fill the same positions with different migrations. Each 1.5 schema
+    # change moves where a 1.5 server's count lands in 1.6, and the updater
+    # skips every 1.6 step below it. 1.5.10.2518 skipped 1.6's CREATE TABLE
+    # fileDeleteQueue and its users.uName widening. The `rehearsal` job above
+    # cannot see this: it builds its start from 1.6's own steps.
+    #
+    # fogproject's tests/upgrade-from-15-ci.test.sh does the work. It installs
+    # the 1.5 schema with 1.5's own updater, served by Apache in a php:7.4
+    # container, then upgrades with this tree's, and fails on an update error,
+    # a short schema version, or any structure that differs from a fresh
+    # install.
+    #
+    # TWO LEGS. `stable` is what a 1.5 server runs today. `dev-branch` is where
+    # the next 1.5 schema change lands first, so that leg goes red on 1.6 pull
+    # requests before the change ships in a 1.5 release. Only the `stable` leg
+    # is meant to be a required context: a dev-branch change is not the 1.6
+    # pull request's fault.
+    #
+    # The 1.5 refs always come from FOGProject/fogproject, also for a fork's
+    # pull request, because they describe the servers in the field.
+    strategy:
+      fail-fast: false
+      matrix:
+        from: [stable, dev-branch]
+
+    services:
+      db:
+        image: mariadb:11.8
+        env:
+          MARIADB_ALLOW_EMPTY_ROOT_PASSWORD: "yes"
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mariadb-admin ping -h 127.0.0.1"
+          --health-interval=10s
+          --health-timeout=5s
+          --health-retries=12
+
+    steps:
+      - name: Check out the pull request
+        uses: actions/checkout@v7
+        with:
+          repository: ${{ inputs.repository || github.repository }}
+          ref: ${{ inputs.branch || github.ref }}
+
+      - name: Does this branch have the 1.5 upgrade gate?
+        id: probe
+        run: |
+          if [ -f tests/upgrade-from-15-ci.test.sh ]; then
+            echo 'present=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'present=false' >> "$GITHUB_OUTPUT"
+            {
+              echo '### upgrade from ${{ matrix.from }}'
+              echo ''
+              echo 'No `tests/upgrade-from-15-ci.test.sh` on this branch. Skipped.'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Fetch the 1.5 branch
+        if: steps.probe.outputs.present == 'true'
+        run: >-
+          git fetch --no-tags --depth=1
+          https://github.com/FOGProject/fogproject.git
+          "+refs/heads/${{ matrix.from }}:refs/remotes/origin/${{ matrix.from }}"
+
+      - name: Set up PHP 7.4
+        if: steps.probe.outputs.present == 'true'
+        uses: shivammathur/setup-php@v2
+        with:
+          # The gate's own reads (PDO, the manifest, the shape check) run here.
+          # The two web trees run in the container the script builds.
+          php-version: '7.4'
+          extensions: pdo_mysql, gettext, openssl, json
+          coverage: none
+
+      - name: Wait for the server
+        if: steps.probe.outputs.present == 'true'
+        run: |
+          for i in $(seq 1 30); do
+            if php -r 'new PDO("mysql:host=127.0.0.1;port=3306", "root", "");' 2>/dev/null; then
+              echo "server accepting connections after ${i}s"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::database service never accepted a connection"
+          exit 1
+
+      - name: Upgrade a ${{ matrix.from }} database
+        if: steps.probe.outputs.present == 'true'
+        env:
+          UP15_HOST: 127.0.0.1;port=3306
+          UP15_USER: root
+          UP15_PASS: ""
+          UP15_DB: up15_ci
+          FROM_REF: origin/${{ matrix.from }}
+        # pipefail, for the same reason as the rehearsal step above.
+        shell: bash
+        run: bash tests/upgrade-from-15-ci.test.sh 2>&1 | tee "$RUNNER_TEMP/upgrade15.txt"
+
+      - name: Summarise
+        if: always() && steps.probe.outputs.present == 'true'
+        run: |
+          {
+            echo '### upgrade from ${{ matrix.from }}'
+            echo ''
+            echo '```'
+            tail -60 "$RUNNER_TEMP/upgrade15.txt" 2>/dev/null || echo 'no output'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
   pins:
     name: release pins resolve
     runs-on: ubuntu-latest
