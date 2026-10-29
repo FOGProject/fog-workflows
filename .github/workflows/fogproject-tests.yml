@@ -215,7 +215,15 @@ jobs:
           # repository rather than of whichever PHP the maintainer happened to
           # run, so the check has to resolve under it too.
           php-version: '7.4'
-          tools: composer:v2
+          # An exact Composer, not composer:v2. Composer 2.11.0 (runners got it
+          # on 2026-10-29) computes composer.lock's content-hash differently
+          # from 2.10.3, and neither accepts the other's hash. With v2 a
+          # Composer release turned this required check red on every pull
+          # request with no change to the lock. A required check must change
+          # only when the pull request does. To move up: bump this and
+          # regenerate packages/web/composer.lock with the same version, on
+          # every branch with a composer tree, in one change.
+          tools: composer:2.10.3
           extensions: json, openssl
           coverage: none
 
