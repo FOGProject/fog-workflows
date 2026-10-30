@@ -66,8 +66,14 @@ jobs:
           # The line is the tag minus its last dot-field (1.5.10.2504 -> 1.5.10.).
           # The first release of a line has no predecessor in it, so it falls
           # back to the highest release below it by version.
+          #
+          # Pre-release tags (1.6.0-RC-21) are left out: they carry a '-', and a
+          # release tag never does. sort -V puts 1.6.0-RC-21 AFTER 1.6.0, so the
+          # first 1.6.0.N release fell back to the last RC instead of 1.6.0. The
+          # notes then listed RC..stable, and stable reaches the whole 1.5
+          # history through the release merge.
           releases=$(gh release list --repo FOGProject/fogproject --exclude-drafts --limit 500 \
-            --json tagName --jq '.[].tagName')
+            --json tagName --jq '.[].tagName | select(contains("-") | not)')
           prevTag=$(printf '%s\n' "$releases" | awk -v p="${tag%.*}." 'index($0, p) == 1' | sort -V | tail -n1)
           if [[ -z $prevTag ]]; then
             prevTag=$(printf '%s\n%s\n' "$releases" "$tag" | sort -uV | awk -v t="$tag" '$0 == t { print prev; exit } { prev = $0 }')
@@ -75,7 +81,14 @@ jobs:
           echo "prevTag=$prevTag" >> "$GITHUB_OUTPUT"
           echo "Tag: $tag"
           echo "Previous Tag: $prevTag"
-          if [[ "$tag" == "$prevTag" ]]; then
+          # Nothing on dev-branch that stable lacks: no release. The 1.5 line
+          # never got here, because each merge added a version-sync commit. A
+          # line that generates its version (1.6) adds none, so right after
+          # 1.6.0 dev-branch IS stable while the badge says 1.6.0.0, and
+          # `gh pr create` failed with "No commits between".
+          ahead=$(gh api repos/FOGProject/fogproject/compare/stable...dev-branch --jq .ahead_by)
+          echo "dev-branch is ${ahead} commit(s) ahead of stable"
+          if [[ "$tag" == "$prevTag" || "$ahead" == "0" ]]; then
             echo "Not a new version. Exiting nothing to do"
             echo "skip_release=true" >> "$GITHUB_OUTPUT"
             exit 0
