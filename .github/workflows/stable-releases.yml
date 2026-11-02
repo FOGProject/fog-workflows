@@ -54,10 +54,24 @@ jobs:
         run: |
           echo 'Get version to be released and create PR with that in the name'
           # sync-and-check-dev-branch-before-release (above) already ran the version sync
-          # workflow for dev-branch, which always rewrites badges/dev-branch.json to the
-          # current FOG_VERSION whether or not it drifted - so this file is already fresh,
-          # no need to check out fogproject and grep system.class.php for it.
-          tag=$(jq -r '.message' badges/dev-branch.json)
+          # workflow for dev-branch, which rewrites badges/dev-branch.json to the
+          # current FOG_VERSION through the contents API -- a NEW commit on main.
+          # actions/checkout above checked out the commit this run started on,
+          # which predates that write, so the badge in the working tree is the
+          # previous one. Read main as it is now. On 2026-11-02 the working-tree
+          # copy said 1.5.10.2537 while the sync had just written 1.6.0.14, and
+          # the release PR (#2039) was opened as 1.5.10.2537.
+          git fetch --quiet origin main
+          tag=$(git show origin/main:badges/dev-branch.json | jq -r '.message')
+          # A release must be newer than every release already published. A
+          # stale or wrong badge fails here, before a PR, merge or tag exists.
+          newest=$(gh release list --repo FOGProject/fogproject --exclude-drafts --limit 500 \
+            --json tagName --jq '.[].tagName' | grep -v -e '-' | sort -V | tail -n1)
+          if [ -z "$tag" ] || [ -z "$newest" ] || [ "$tag" = "$newest" ] \
+            || [ "$(printf '%s\n%s\n' "$newest" "$tag" | sort -V | tail -n1)" != "$tag" ]; then
+            echo "::error::Version to release '$tag' is not newer than the newest release '$newest'. Not opening a release PR."
+            exit 1
+          fi
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           # The previous release IN THIS LINE, not GitHub's "Latest". Latest is
           # the highest release overall, and once a newer line is published
