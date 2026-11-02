@@ -404,7 +404,6 @@ jobs:
         echo "TAG=${{ needs.merge-after-all-tests-passed.outputs.release_tag }}" >> $GITHUB_ENV
         echo "PREV_TAG=${{ needs.merge-after-all-tests-passed.outputs.previous_tag }}" >> $GITHUB_ENV
         echo "NOTES_FILE=$RUNNER_TEMP/release_body.md" >> $GITHUB_ENV
-        echo "WORKING_1_6=$(jq -r '.message' fog-workflows/badges/working-1.6.json)" >> $GITHUB_ENV
 
     - name: Generate Base PR Notes
       env:
@@ -484,14 +483,13 @@ jobs:
               # "" (shown as "Other" in the UI) rather than the "other" enum value, which the
               # PATCH then rejects with a 422 if echoed back unchanged.
               #
-              # Also appends the current working-1.6 beta version (from badges/working-1.6.json)
-              # when patched_versions doesn't already mention a 1.6 line - historically these
-              # advisories affecting both branches got a manual 1.6.0-beta.NNNN entry too.
-              updated_vulns=$(echo "$current_vulns" | jq --arg new_tag ">=$TAG" --arg beta_tag ">=$WORKING_1_6" 'map(
+              # This step used to append the working-1.6 beta version too. It was
+              # removed at the 1.6.0 release: the stable line is 1.6, so $TAG is
+              # itself the 1.6 patched version, and working-1.6 is being retired.
+              updated_vulns=$(echo "$current_vulns" | jq --arg new_tag ">=$TAG" 'map(
                 .package.ecosystem = (if .package.ecosystem == "" or .package.ecosystem == null then "other" else .package.ecosystem end) |
                 .package.name = (if .package.name == "" or .package.name == null then "FOGProject" else .package.name end) |
-                (if .patched_versions == "" or .patched_versions == null then $new_tag else .patched_versions + ", " + $new_tag end) as $with_stable |
-                .patched_versions = (if ($with_stable | test("1\\.6")) then $with_stable else $with_stable + ", " + $beta_tag end)
+                .patched_versions = (if .patched_versions == "" or .patched_versions == null then $new_tag else .patched_versions + ", " + $new_tag end)
               )')
               
               echo "{\"vulnerabilities\": $updated_vulns}" > "$RUNNER_TEMP/patch_payload.json"
