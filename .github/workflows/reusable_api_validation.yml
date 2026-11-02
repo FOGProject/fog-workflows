@@ -39,7 +39,7 @@ on:
       ref:
         description: "branch or tag to install"
         required: false
-        default: "working-1.6"
+        default: "dev-branch"
         type: string
       distro:
         required: false
@@ -76,7 +76,7 @@ on:
       ref:
         description: "branch or tag to install"
         required: false
-        default: "working-1.6"
+        default: "dev-branch"
         type: string
       distro:
         required: false

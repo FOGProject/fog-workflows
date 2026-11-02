@@ -687,19 +687,17 @@ jobs:
     # a short schema version, or any structure that differs from a fresh
     # install.
     #
-    # TWO LEGS. `stable` is what a 1.5 server runs today, pinned (see the
-    # fetch step). `dev-branch` is where
-    # the next 1.5 schema change lands first, so that leg goes red on 1.6 pull
-    # requests before the change ships in a 1.5 release. Only the `stable` leg
-    # is meant to be a required context: a dev-branch change is not the 1.6
-    # pull request's fault.
+    # ONE LEG. `stable` is the last 1.5 release, pinned (see the fetch step).
+    # A `dev-branch` leg used to run as an advisory early warning for the
+    # next 1.5 schema change. It was retired at the 1.6.0 release: dev-branch
+    # carries 1.6 now and 1.5 is end of life, so that leg tested nothing.
     #
     # The 1.5 refs always come from FOGProject/fogproject, also for a fork's
     # pull request, because they describe the servers in the field.
     strategy:
       fail-fast: false
       matrix:
-        from: [stable, dev-branch]
+        from: [stable]
 
     services:
       db:
@@ -745,9 +743,6 @@ jobs:
         # once, and the queue would merge nothing until a fix landed. A pull
         # request that bumps the pin makes the new 1.5 schema its own problem,
         # and fixes it in the same change.
-        #
-        # The `dev-branch` leg is advisory, so it floats: it is the early
-        # warning that the next pin bump will need a 1.6 fix.
         #
         # A tree without the pin file uses the tip.
         shell: bash

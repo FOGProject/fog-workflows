@@ -35,7 +35,7 @@ on:
   workflow_dispatch:
     inputs:
       branch:
-        description: "fogproject branch to install (e.g. working-1.6)"
+        description: "fogproject branch to install (e.g. dev-branch)"
         required: true
         type: string
   workflow_call:
