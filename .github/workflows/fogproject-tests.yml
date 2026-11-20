@@ -345,6 +345,15 @@ jobs:
           # the same class of failure from the other vendor.
           - server: mysql:8.0
             image: mysql:8.0
+          # ADVISORY. Ubuntu 26.10 ships MySQL 9, and that is where FOG first
+          # broke on MySQL (fogproject #2115, #2121). The floating tag follows
+          # each new 9.x release, so a red leg here can be MySQL's change, not
+          # the pull request's. It is advisory because "schema on mysql:9" is
+          # NOT in the dev-branch ruleset's required contexts. It still goes
+          # red on a failure. Do not add continue-on-error: that turns a
+          # failure green, which is how the MySQL break went unseen.
+          - server: mysql:9
+            image: mysql:9
 
     services:
       db:
