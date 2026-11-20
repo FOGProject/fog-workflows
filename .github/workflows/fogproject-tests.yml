@@ -309,18 +309,13 @@ jobs:
     # be caught by the person introducing it: on the generating server every one
     # of these statements is valid." Only an older server ever sees it. This is
     # how an older server gets to see it. fogproject GH-1221.
-    # EVERY leg is `tolerated` right now, and that is a temporary state with a
-    # ticket, not a design. Turning on pipefail below made this job report what
-    # the test was already saying: 12 of 278 statements fail on the fresh-install
-    # replay path, identically on 10.5, 11.8 and MySQL 8.0 -- historical ALTERs
-    # replayed against a database that no longer matches the state they were
-    # written for. That is fogproject GH-1241, it predates this job, and it is
-    # not something to redden every pull request over while it is unfixed.
-    #
-    # The alternative -- leave the swallow in place so the job stays green -- is
-    # how it went unnoticed in the first place. Reporting honestly and not
-    # blocking is the better half of that trade, and the tolerance comes off
-    # with GH-1241, not on somebody's judgement of the day.
+    # EVERY leg is a gate. The legs were `continue-on-error` while fogproject
+    # GH-1241 (12 historical ALTERs failing the replay) and GH-1152 (server
+    # default collation) were open. Both are closed. While the legs were
+    # tolerated, FOG 1.6 stopped installing on MySQL and nothing went red:
+    # fogproject GH-2121 fixed that and made this test run the MySQL rewrite
+    # the reconciler applies. A schema change that breaks one server now
+    # fails the pull request that makes it.
     strategy:
       fail-fast: false
       matrix:
@@ -330,7 +325,6 @@ jobs:
           # the CHARSET=utf8mb3 probe GH-1152 flags as unverified inference.
           - server: mariadb:10.5
             image: mariadb:10.5
-            tolerated: true
           # The far side of the collation boundary. This leg was pinned at
           # 11.4 on the strength of fogproject GH-1152's opening claim that
           # "MariaDB >= 11.4" resolves a bare CHARSET=utf8 to
@@ -347,12 +341,10 @@ jobs:
           # scripts/background_scripts/probe_schema_collation_matrix.sh.)
           - server: mariadb:11.8
             image: mariadb:11.8
-            tolerated: true
           # MySQL has never had the UCA-14.0.0 collations at all, so it catches
           # the same class of failure from the other vendor.
           - server: mysql:8.0
             image: mysql:8.0
-            tolerated: true
 
     services:
       db:
@@ -430,7 +422,6 @@ jobs:
 
       - name: Execute the schema
         if: steps.schema_test.outputs.present == 'true'
-        continue-on-error: ${{ matrix.tolerated }}
         env:
           FOG_TEST_DSN: mysql:host=127.0.0.1;port=3306
           FOG_TEST_USER: root
@@ -458,11 +449,8 @@ jobs:
       # without -- which is all of CI. It sat that way from the day the
       # seventh row was added.
       #
-      # NOT `continue-on-error`. Every leg of this job tolerates the SCHEMA
-      # step because of fogproject GH-1241, and that tolerance is scoped to
-      # that step deliberately -- it is about historical ALTERs replaying
-      # against a modern server, and says nothing about these tests. A gate
-      # nobody can fail is the thing this step exists to stop.
+      # NOT `continue-on-error`. A gate nobody can fail is the thing this step
+      # exists to stop.
       #
       # ONE LEG. These tests assert on join semantics and TEMPORARY table
       # behavior, not on collation, so running them three times says the same
@@ -472,9 +460,8 @@ jobs:
       # DISCOVERED, not listed. Any test naming FOG_TEST_DSN has a database
       # half by construction, so a new one is picked up without editing this
       # workflow -- a hardcoded list is how the previous gap would come back.
-      # schema-executes is excluded because the step above already runs it,
-      # tolerated, and running it again here untolerated would redden every
-      # pull request on GH-1241.
+      # schema-executes is excluded because the step above already runs it on
+      # every leg.
       - name: Run the DB-backed tests
         if: >-
           steps.schema_test.outputs.present == 'true'
@@ -520,11 +507,6 @@ jobs:
             echo '```'
             cat "$RUNNER_TEMP/schema.txt" 2>/dev/null || echo 'no output'
             echo '```'
-            if [ "${{ matrix.tolerated }}" = "true" ]; then
-              echo ''
-              echo '> Non-blocking. A collation failure on this leg is fogproject GH-1152,'
-              echo '> an open decision rather than a regression.'
-            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
   rehearsal:
@@ -556,10 +538,8 @@ jobs:
     # its reviewer. A number hardcoded here goes stale where nobody making the
     # change is looking.
     #
-    # NOT `continue-on-error`. The `schema` job's legs are tolerated because of
-    # fogproject GH-1241, and that tolerance is scoped to that step deliberately.
-    # It says nothing about this one, and a gate nobody can fail is the thing
-    # these jobs exist to stop.
+    # NOT `continue-on-error`. A gate nobody can fail is the thing these jobs
+    # exist to stop.
     #
     # ONE ENGINE. This asserts constraint and sweep behavior, not collation, so
     # running it on three servers would say the same thing three times. 11.8 is
