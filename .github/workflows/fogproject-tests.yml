@@ -848,11 +848,13 @@ jobs:
 
           # Every pin is optional, and which ones exist is read from the tree
           # rather than from the branch name -- this workflow is shared by
-          # every fogproject branch, and dev-branch and stable carry only the
-          # iPXE pin. Deciding from the branch name means a new branch is
+          # every fogproject branch, and the set of pins differs by branch and
+          # grows over time. Deciding from the branch name means a new branch is
           # silently unchecked. (Same reasoning as the vendor job above.)
           ipxe=$(pin FOG_IPXE_VERSION)
           plugins=$(pin FOG_PLUGINS_VERSION)
+          # The installer builds udp-sender from this release (configureUDPCast).
+          udpcast=$(pin FOG_UDPCAST_VERSION)
 
           # The Secure Boot tarball is a separate asset and not every branch
           # fetches it, so ask the installer on THIS branch whether it does
@@ -891,6 +893,9 @@ jobs:
 
           check FOGProject/fog-plugins FOG_PLUGINS_VERSION "$plugins" \
             "fog-plugins-${plugins}.tar.gz"
+
+          check FOGProject/udpcast FOG_UDPCAST_VERSION "$udpcast" \
+            "udpcast-${udpcast}.tar.gz"
 
           ipxe_assets=("fog-ipxe-${ipxe}.tar.gz")
           [ "$sb" = yes ] && ipxe_assets+=("fog-ipxe-secureboot-${ipxe}.tar.gz")
